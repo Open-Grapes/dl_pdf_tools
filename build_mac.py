@@ -202,9 +202,12 @@ def smoke_test():
             if state.exists():
                 st = json.loads(state.read_text())
                 break
-        if not st:
+        if not st or st.get("error"):
             log.seek(0)
-            print(log.read(), flush=True)
+            print("wifi output:", log.read(), flush=True)
+            crash = CONFIG / "wifi.log"
+            print("wifi.log:", crash.read_text() if crash.exists() else "(none)", flush=True)
+            print("process exit code:", p.poll(), flush=True)
         assert st, "Share via Wi-Fi didn't start"
         for _ in range(30):   # the .local name is announced in the background
             if st.get("mdns") != "pending":

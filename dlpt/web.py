@@ -394,7 +394,28 @@ def _announce(ip, port):
 
 
 def serve_wifi(parent_pid=None):
-    """Run the page for phones on this network until the desktop app (parent_pid) turns it off or quits."""
+    """Run the page for phones on this network until the desktop app (parent_pid) turns it off or quits.
+
+    Problems are written to wifi.json ("error") and wifi.log, because the windowed app has no console.
+    """
+    import faulthandler
+    import traceback
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    crash_log = open(CONFIG_DIR / "wifi.log", "w", encoding="utf-8")
+    faulthandler.enable(crash_log)
+    try:
+        return _serve_wifi(parent_pid)
+    except BaseException as e:
+        crash_log.write(traceback.format_exc())
+        crash_log.flush()
+        try:
+            WIFI_STATE.write_text(json.dumps({"error": f"{e.__class__.__name__}: {e}"}), encoding="utf-8")
+        except OSError:
+            pass
+        return 1
+
+
+def _serve_wifi(parent_pid):
     WIFI_STATE.unlink(missing_ok=True)
     ip = lan_ip()
     if not ip:

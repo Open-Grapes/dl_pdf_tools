@@ -8,7 +8,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QRect, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QFormLayout,
@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStyle, QToolBar,
                                QVBoxLayout, QWidget)
 
-from . import engine
+from . import engine, jobs
 from .common import APP_NAME, APP_VERSION, asset, human_size, load_settings, save_settings
 
 PT = 96 / 72          # screen pixels per PDF point at 100 %
@@ -323,20 +323,42 @@ class ThumbList(QListWidget):
 
 # ======================================================================== background work
 
-class Task(QThread):
-    progress = Signal(str)
-    done = Signal(object)
-    failed = Signal(str)
+class Bridge(QObject):
+    """Delivers results from worker processes back to the GUI thread."""
+    arrived = Signal(object, object, object)   # future, on_done, on_error
 
-    def __init__(self, fn, parent=None):
-        super().__init__(parent)
-        self.fn = fn
+    def __init__(self):
+        super().__init__()
+        self.arrived.connect(self._deliver)
 
-    def run(self):
+    def submit(self, fn, *args, on_done=None, on_error=None, **kwargs):
+        fut = jobs.submit(fn, *args, **kwargs)
+        fut.add_done_callback(lambda f: self.arrived.emit(f, on_done, on_error))
+        return fut
+
+    @staticmethod
+    def _deliver(fut, on_done, on_error):
+        if fut.cancelled():
+            return
         try:
-            self.done.emit(self.fn(self.progress.emit))
-        except Exception as e:  # shown to the user in a message box
-            self.failed.emit(str(e) or e.__class__.__name__)
+            exc = fut.exception()
+            if exc is not None:
+                if on_error:
+                    on_error(str(exc) or exc.__class__.__name__)
+            elif on_done:
+                on_done(fut.result())
+        except RuntimeError:
+            pass  # the dialog that asked for this result has been closed
+
+
+_bridge = None
+
+
+def bridge():
+    global _bridge
+    if _bridge is None:
+        _bridge = Bridge()
+    return _bridge
 
 
 # ======================================================================== dialogs
@@ -453,10 +475,11 @@ class SplitDialog(QDialog):
 
 
 class ExtractDialog(QDialog):
-    def __init__(self, parent, src, page_count, pages):
+    def __init__(self, parent, src, page_count, pages, password=None, saved=None):
         super().__init__(parent)
         self.setWindowTitle("Extract pages")
-        self.src, self.count = Path(src), page_count
+        self.src, self.count, self.password = Path(src), page_count, password
+        self.saved, self.cvalues = saved or {}, None
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(f"<b>{self.src.name}</b> — {page_count} pages"))
 
@@ -476,6 +499,21 @@ class ExtractDialog(QDialog):
         lay.addWidget(self.r_each)
         self.folder = PathRow(self.src.parent / f"{self.src.stem}_pages", "dir")
         lay.addWidget(self.folder)
+
+        srow = QHBoxLayout()
+        self.shrink = QCheckBox("Also reduce file size")
+        self.shrink_btn = QPushButton("Options…")
+        self.shrink_info = QLabel()
+        self.shrink_info.setStyleSheet("color: palette(placeholder-text);")
+        srow.addWidget(self.shrink)
+        srow.addWidget(self.shrink_btn)
+        srow.addWidget(self.shrink_info, 1)
+        lay.addSpacing(6)
+        lay.addLayout(srow)
+        self.shrink.toggled.connect(self._shrink_toggled)
+        self.shrink_btn.clicked.connect(self._shrink_options)
+        self.shrink_btn.setEnabled(False)
+        self.shrink_info.setVisible(False)
         self.preview = QLabel()
         lay.addWidget(self.preview)
 
@@ -492,10 +530,36 @@ class ExtractDialog(QDialog):
         self.resize(540, self.sizeHint().height())
         self._update()
 
+    def _shrink_toggled(self, on):
+        self.shrink_btn.setEnabled(on)
+        if on and self.cvalues is None and not self._shrink_options():
+            self.shrink.blockSignals(True)
+            self.shrink.setChecked(False)
+            self.shrink.blockSignals(False)
+            self.shrink_btn.setEnabled(False)
+        self.shrink_info.setVisible(self.shrink.isChecked())
+
+    def _shrink_options(self):
+        """Open the Reduce size choices for the pages being extracted. Returns True if confirmed."""
+        try:
+            pages = engine.parse_pages(self.pages.text(), self.count)
+        except engine.RangeError as e:
+            QMessageBox.warning(self, "Extract pages", str(e))
+            return False
+        d = CompressOptionsDialog(self, self.src, self.password, pages, self.saved)
+        if d.exec() != QDialog.DialogCode.Accepted:
+            return False
+        self.cvalues, self.saved = d.opts.options(), d.opts.remember()
+        self.shrink_info.setText(d.opts.describe())
+        self._info_pages = self.pages.text()
+        return True
+
     def _update(self, *_):
         one = self.r_one.isChecked()
         self.save.setEnabled(one)
         self.folder.setEnabled(not one)
+        if self.cvalues is not None and self.pages.text() != getattr(self, "_info_pages", None):
+            self.shrink_info.setText(self.shrink_info.text().split(" · ")[0])   # estimate was for other pages
         try:
             pages = engine.parse_pages(self.pages.text(), self.count)
         except engine.RangeError as e:
@@ -516,6 +580,7 @@ class ExtractDialog(QDialog):
         try:
             self.result_pages = engine.parse_pages(self.pages.text(), self.count)
             self.result_one = self.r_one.isChecked()
+            self.result_compress = self.cvalues if self.shrink.isChecked() else None
             if self.result_one:
                 p = self.save.path()
                 if p.suffix.lower() != ".pdf":
@@ -538,36 +603,53 @@ class ExtractDialog(QDialog):
         self.accept()
 
 
-class CompressDialog(QDialog):
-    def __init__(self, parent, src, settings):
-        super().__init__(parent)
-        self.setWindowTitle("Reduce file size")
-        self.src = Path(src)
-        lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"<b>{self.src.name}</b> — currently {human_size(self.src.stat().st_size)}"))
+class CompressOptions(QWidget):
+    """Preset / custom choice and options, with a live size estimate next to each choice.
 
+    pages=None estimates compressing the whole file; a list of pages estimates extracting those pages.
+    """
+
+    KEYS = list(engine.PRESETS) + ["custom"]
+
+    def __init__(self, src, password=None, pages=None, saved=None, parent=None):
+        super().__init__(parent)
+        self.src, self.password, self.pages = Path(src), password, pages
+        self.est, self.futs, self.gen = {}, {}, {}
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        grid = QGridLayout()
+        grid.setColumnStretch(1, 1)
+        grid.setHorizontalSpacing(14)
         self.grp = QButtonGroup(self)
-        self.radios = {}
-        for key, pr in engine.PRESETS.items():
-            rb = QRadioButton(f"{pr['label']}   ({pr['dpi']} dpi images, quality {pr['quality']})")
+        self.radios, self.labels = {}, {}
+        for row, (key, pr) in enumerate(engine.PRESETS.items()):
+            rb = QRadioButton(f"{pr['label']}   ({pr['dpi']} dpi, quality {pr['quality']})")
+            grid.addWidget(rb, row, 0, 1, 2)
             self.radios[key] = rb
-            self.grp.addButton(rb)
-            lay.addWidget(rb)
+        row = len(engine.PRESETS)
         rb = QRadioButton("Custom")
         self.radios["custom"] = rb
-        self.grp.addButton(rb)
-        row = QHBoxLayout()
-        row.addWidget(rb)
+        grid.addWidget(rb, row, 0)
+        crow = QHBoxLayout()
         self.dpi = QSpinBox()
         self.dpi.setRange(36, 600)
         self.dpi.setSuffix(" dpi")
         self.quality = QSpinBox()
         self.quality.setRange(10, 100)
         self.quality.setPrefix("quality ")
-        row.addWidget(self.dpi)
-        row.addWidget(self.quality)
-        row.addStretch(1)
-        lay.addLayout(row)
+        crow.addWidget(self.dpi)
+        crow.addWidget(self.quality)
+        crow.addStretch(1)
+        grid.addLayout(crow, row, 1)
+        for i, key in enumerate(self.KEYS):
+            self.grp.addButton(self.radios[key])
+            lab = QLabel()
+            lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            lab.setMinimumWidth(150)
+            grid.addWidget(lab, i, 2)
+            self.labels[key] = lab
+        lay.addLayout(grid)
         lay.addWidget(_note("Pictures and scans larger than the chosen resolution are scaled down and re-saved as "
                             "JPEG. Text and vector graphics stay sharp. Fonts are trimmed to the characters used "
                             "and unused data is removed."))
@@ -577,6 +659,141 @@ class CompressDialog(QDialog):
         self.no_img = QCheckBox("Don't touch images (lossless only)")
         for c in (self.gray, self.meta, self.no_img):
             lay.addWidget(c)
+        self.summary = QLabel()
+        self.summary.setStyleSheet("font-weight: 600; padding-top: 6px;")
+        lay.addWidget(self.summary)
+
+        c = saved or {}
+        self.radios.get(c.get("preset", "balanced"), self.radios["balanced"]).setChecked(True)
+        self.dpi.setValue(c.get("dpi", 150))
+        self.quality.setValue(c.get("quality", 72))
+        self.gray.setChecked(c.get("gray", False))
+        self.meta.setChecked(c.get("meta", False))
+        self.no_img.setChecked(c.get("no_img", False))
+
+        self.custom_timer = QTimer(self)
+        self.custom_timer.setSingleShot(True)
+        self.custom_timer.setInterval(500)
+        self.custom_timer.timeout.connect(lambda: self._estimate(["custom"]))
+        for sb in (self.dpi, self.quality):
+            sb.valueChanged.connect(self._custom_changed)
+        for cb in (self.gray, self.meta, self.no_img):
+            cb.toggled.connect(self._options_changed)
+        self.grp.buttonToggled.connect(lambda *_: self._show_summary())
+        self._enable()
+        QTimer.singleShot(0, self._estimate_all)
+
+    # ---------------------------------------------------------------- values
+    def preset(self):
+        return next(k for k, rb in self.radios.items() if rb.isChecked())
+
+    def _key(self):
+        return "lossless" if self.no_img.isChecked() else self.preset()
+
+    def _opts(self, key):
+        return engine.options_for("balanced" if key == "lossless" else key, self.dpi.value(), self.quality.value(),
+                                  self.gray.isChecked(), self.meta.isChecked(), images=key != "lossless")
+
+    def options(self):
+        return self._opts(self._key())
+
+    def remember(self):
+        return {"preset": self.preset(), "dpi": self.dpi.value(), "quality": self.quality.value(),
+                "gray": self.gray.isChecked(), "meta": self.meta.isChecked(), "no_img": self.no_img.isChecked()}
+
+    def describe(self):
+        key = self._key()
+        name = "Lossless" if key == "lossless" else "Custom" if key == "custom" else \
+            engine.PRESETS[key]["label"].split(" –")[0]
+        r = self.est.get(key)
+        return f"{name} · ≈ {human_size(r['size'])}" if r else name
+
+    # ---------------------------------------------------------------- estimates
+    def _enable(self):
+        on = not self.no_img.isChecked()
+        for w in list(self.radios.values()) + [self.dpi, self.quality, self.gray] + list(self.labels.values()):
+            w.setEnabled(on)
+
+    def _custom_changed(self, *_):
+        self.radios["custom"].setChecked(True)
+        self.labels["custom"].setText("…")
+        self.est.pop("custom", None)
+        self._show_summary()
+        self.custom_timer.start()
+
+    def _options_changed(self, *_):
+        self._enable()
+        self._estimate_all()
+
+    def _estimate_all(self):
+        self.est.clear()
+        self._estimate(["lossless"] if self.no_img.isChecked() else self.KEYS)
+        if self.no_img.isChecked():
+            for lab in self.labels.values():
+                lab.setText("")
+
+    def _estimate(self, keys):
+        for key in keys:
+            old = self.futs.pop(key, None)
+            if old is not None:
+                old.cancel()
+            g = self.gen[key] = self.gen.get(key, 0) + 1
+            if key in self.labels:
+                self.labels[key].setText("estimating…")
+            self.futs[key] = bridge().submit(
+                engine.estimate, str(self.src), self._opts(key), self.pages, self.password,
+                on_done=lambda r, k=key, g=g: self._got(k, g, r),
+                on_error=lambda m, k=key, g=g: self._got(k, g, None))
+        self._show_summary()
+
+    def _got(self, key, g, r):
+        if self.gen.get(key) != g:
+            return   # a newer estimate for this choice is on its way
+        self.futs.pop(key, None)
+        if r is None:
+            if key in self.labels:
+                self.labels[key].setText("—")
+            return
+        self.est[key] = r
+        if key in self.labels:
+            self.labels[key].setText(self._fmt(r))
+            self.labels[key].setToolTip("" if r["exact"] else "Estimated from a sample of pages")
+        self._show_summary()
+
+    @staticmethod
+    def _fmt(r):
+        if r["size"] >= r["base"]:
+            return "no smaller"
+        pct = 100 * (1 - r["size"] / r["base"])
+        return f"≈ {human_size(r['size'])}  (−{pct:.0f}%)"
+
+    def _show_summary(self):
+        r = self.est.get(self._key())
+        what = "Estimated size" if self.pages is None else "Estimated size of the extracted file"
+        if r is None:
+            self.summary.setText(f"{what}: estimating…")
+        elif r["size"] >= r["base"]:
+            self.summary.setText(f"{what}: can't get smaller than {human_size(r['base'])} with these settings")
+        else:
+            self.summary.setText(f"{what}: ≈ {human_size(r['size'])}  "
+                                 f"(from {human_size(r['base'])}, {100 * (1 - r['size'] / r['base']):.0f}% smaller)")
+
+    def cancel(self):
+        for f in self.futs.values():
+            f.cancel()
+        self.futs.clear()
+        self.gen = {k: v + 1 for k, v in self.gen.items()}
+
+
+class CompressDialog(QDialog):
+    def __init__(self, parent, src, password, settings):
+        super().__init__(parent)
+        self.setWindowTitle("Reduce file size")
+        self.src = Path(src)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"<b>{self.src.name}</b> — currently {human_size(self.src.stat().st_size)}"))
+        self.opts = CompressOptions(src, password, None, settings.get("compress"))
+        lay.addWidget(self.opts)
 
         form = QFormLayout()
         self.out = PathRow(self.src.parent / f"{self.src.stem}_compressed.pdf", "save")
@@ -588,41 +805,8 @@ class CompressDialog(QDialog):
         bb.accepted.connect(self._accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
-
-        c = settings.get("compress", {})
-        self.radios.get(c.get("preset", "balanced"), self.radios["balanced"]).setChecked(True)
-        self.dpi.setValue(c.get("dpi", 150))
-        self.quality.setValue(c.get("quality", 72))
-        self.gray.setChecked(c.get("gray", False))
-        self.meta.setChecked(c.get("meta", False))
-        self.no_img.setChecked(c.get("no_img", False))
-        self.dpi.valueChanged.connect(lambda _: self.radios["custom"].setChecked(True))
-        self.quality.valueChanged.connect(lambda _: self.radios["custom"].setChecked(True))
-        self.no_img.toggled.connect(self._update)
-        self._update()
-        self.resize(560, self.sizeHint().height())
-
-    def _update(self, *_):
-        on = not self.no_img.isChecked()
-        for w in list(self.radios.values()) + [self.dpi, self.quality, self.gray]:
-            w.setEnabled(on)
-
-    def preset(self):
-        return next(k for k, rb in self.radios.items() if rb.isChecked())
-
-    def options(self):
-        key = self.preset()
-        if key == "custom":
-            dpi, q, thr = self.dpi.value(), self.quality.value(), int(self.dpi.value() * 1.3)
-        else:
-            pr = engine.PRESETS[key]
-            dpi, q, thr = pr["dpi"], pr["quality"], pr["threshold"]
-        return {"dpi": dpi, "quality": q, "threshold": thr, "gray": self.gray.isChecked(),
-                "strip_meta": self.meta.isChecked(), "images": not self.no_img.isChecked()}
-
-    def remember(self):
-        return {"preset": self.preset(), "dpi": self.dpi.value(), "quality": self.quality.value(),
-                "gray": self.gray.isChecked(), "meta": self.meta.isChecked(), "no_img": self.no_img.isChecked()}
+        self.finished.connect(lambda _: self.opts.cancel())
+        self.resize(620, self.sizeHint().height())
 
     def _accept(self):
         p = self.out.path()
@@ -642,13 +826,32 @@ class CompressDialog(QDialog):
         self.accept()
 
 
+class CompressOptionsDialog(QDialog):
+    """The Reduce size choices for pages being extracted (opened from the Extract window)."""
+
+    def __init__(self, parent, src, password, pages, saved):
+        super().__init__(parent)
+        self.setWindowTitle("Reduce size of extracted pages")
+        lay = QVBoxLayout(self)
+        n = len(pages)
+        lay.addWidget(QLabel(f"<b>{Path(src).name}</b> — {n} page{'s' if n != 1 else ''} to extract"))
+        self.opts = CompressOptions(src, password, pages, saved)
+        lay.addWidget(self.opts)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self.finished.connect(lambda _: self.opts.cancel())
+        self.resize(620, self.sizeHint().height())
+
+
 # ======================================================================== main window
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = load_settings()
-        self.doc, self.path, self.password, self.task = None, None, None, None
+        self.doc, self.path, self.password, self.busy = None, None, None, False
         self.setAcceptDrops(True)
         ico = asset("icon.ico")
         if ico:
@@ -810,7 +1013,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, f"{path.name} is not a PDF.")
             return
         password = None
-        while doc.needs_pass:
+        while doc.needs_pass and doc.is_encrypted:   # needs_pass stays True after unlocking; is_encrypted clears
             pw, ok = QInputDialog.getText(self, "Password required", f"{path.name} is protected. Password:",
                                           QLineEdit.EchoMode.Password)
             if not ok:
@@ -879,27 +1082,27 @@ class MainWindow(QMainWindow):
         m.exec(self.thumbs.viewport().mapToGlobal(pos))
 
     # ---------------------------------------------------------------- tools
-    def _run(self, title, fn, on_done):
+    def _run(self, title, fn, *args, on_done, **kwargs):
+        """Run fn in a worker process behind a busy dialog, then call on_done(result)."""
         dlg = QProgressDialog(title, None, 0, 0, self)
         dlg.setWindowTitle(APP_NAME)
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setMinimumDuration(0)
         dlg.setMinimumWidth(360)
         dlg.show()
-        self.task = Task(fn, self)
-        self.task.progress.connect(dlg.setLabelText)
+        self.busy = True
 
         def finished(result):
+            self.busy = False
             dlg.close()
             on_done(result)
 
         def failed(msg):
+            self.busy = False
             dlg.close()
             QMessageBox.critical(self, APP_NAME, f"{title.rstrip('…')} failed:\n\n{msg}")
 
-        self.task.done.connect(finished)
-        self.task.failed.connect(failed)
-        self.task.start()
+        bridge().submit(fn, *args, on_done=finished, on_error=failed, **kwargs)
 
     def _report(self, title, text, reveal, open_pdf=None):
         box = QMessageBox(self)
@@ -921,40 +1124,41 @@ class MainWindow(QMainWindow):
         d = SplitDialog(self, self.path, self.doc.page_count, ranges if isinstance(ranges, str) else "")
         if d.exec() != QDialog.DialogCode.Accepted:
             return
-        src, pw, groups, out = self.path, self.password, d.result_groups, d.out.path()
-
-        def work(report):
-            return engine.split_groups(src, groups, out, pw, lambda i, n: report(f"Writing file {i} of {n}…"))
-
-        self._run("Splitting…", work, lambda files: self._report(
-            "Split PDF", f"Created {len(files)} file{'s' if len(files) != 1 else ''} in\n{out}", out))
+        out = d.out.path()
+        self._run("Splitting…", engine.split_groups, str(self.path), d.result_groups, str(out), self.password,
+                  on_done=lambda files: self._report(
+                      "Split PDF", f"Created {len(files)} file{'s' if len(files) != 1 else ''} in\n{out}", out))
 
     def extract(self, pages=None):
         if not self.doc:
             return
         if not isinstance(pages, list) or not pages:
             pages = self.thumbs.selected_pages() if len(self.thumbs.selectedItems()) > 1 else [self.view.current_page()]
-        d = ExtractDialog(self, self.path, self.doc.page_count, pages)
+        d = ExtractDialog(self, self.path, self.doc.page_count, pages, self.password, self.settings.get("compress"))
         if d.exec() != QDialog.DialogCode.Accepted:
             return
-        src, pw, sel, out = self.path, self.password, d.result_pages, d.result_path
+        if d.result_compress:
+            self.settings["compress"] = d.saved
+        sel, out, comp = d.result_pages, d.result_path, d.result_compress
         n = len(sel)
         if d.result_one:
-            self._run("Extracting pages…", lambda _r: engine.extract(src, sel, out, pw), lambda p: self._report(
-                "Extract pages", f"Saved {n} page{'s' if n != 1 else ''} to\n{p}", p, open_pdf=p))
+            self._run("Extracting pages…", engine.extract, str(self.path), sel, str(out), self.password, comp,
+                      on_done=lambda p: self._report(
+                          "Extract pages", f"Saved {n} page{'s' if n != 1 else ''} ({human_size(Path(p).stat().st_size)})"
+                                           f" to\n{p}", p, open_pdf=p))
         else:
-            self._run("Extracting pages…",
-                      lambda r: engine.extract_each(src, sel, out, pw, lambda i, t: r(f"Writing page {i} of {t}…")),
-                      lambda files: self._report("Extract pages", f"Created {len(files)} files in\n{out}", out))
+            self._run("Extracting pages…", engine.extract_each, str(self.path), sel, str(out), self.password,
+                      compress=comp,
+                      on_done=lambda files: self._report("Extract pages", f"Created {len(files)} files in\n{out}", out))
 
     def compress(self):
         if not self.doc:
             return
-        d = CompressDialog(self, self.path, self.settings)
+        d = CompressDialog(self, self.path, self.password, self.settings)
         if d.exec() != QDialog.DialogCode.Accepted:
             return
-        self.settings["compress"] = d.remember()
-        src, pw, out, opts = self.path, self.password, d.result_path, d.options()
+        self.settings["compress"] = d.opts.remember()
+        src = self.path
 
         def done(r):
             if not r["written"]:
@@ -968,7 +1172,8 @@ class MainWindow(QMainWindow):
                          f"{human_size(r['before'])}  →  {human_size(r['after'])}   ({saved:.0f}% smaller)\n\n"
                          f"Saved as {r['path']}", r["path"], open_pdf=r["path"])
 
-        self._run("Compressing…", lambda rep: engine.compress(src, out, password=pw, progress=rep, **opts), done)
+        self._run("Compressing…", engine.compress, str(src), str(d.result_path), password=self.password,
+                  on_done=done, **d.opts.options())
 
     def _show_current(self):
         if self.path:
@@ -994,42 +1199,19 @@ class MainWindow(QMainWindow):
                 break
 
     def closeEvent(self, e):
-        if self.task is not None and self.task.isRunning():
+        if self.busy:
             QMessageBox.information(self, APP_NAME, "Please wait for the current job to finish.")
             e.ignore()
             return
+        jobs.shutdown()
         self.settings["geometry"] = bytes(self.saveGeometry()).hex()
         save_settings(self.settings)
         self.close_doc()
         super().closeEvent(e)
 
 
-def selftest(src, out_dir):
-    """`dl_pdf_tools.exe --selftest file.pdf folder` runs every operation without the window; for checking builds."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    log = []
-    try:
-        with pymupdf.open(src) as d:
-            n = d.page_count
-        log.append(f"pages {n}")
-        log.append(f"extract {engine.extract(src, [0], out_dir / 'extract.pdf')}")
-        log.append(f"split {len(engine.split_every(src, max(1, n // 2), out_dir))} files")
-        r = engine.compress(src, out_dir / "compressed.pdf", dpi=150, quality=72)
-        log.append(f"compress {r['before']} -> {r['after']} written={r['written']}")
-        log.append("OK")
-    except Exception as e:
-        import traceback
-        log.append(traceback.format_exc())
-        log.append(f"FAILED {e}")
-    (out_dir / "selftest.txt").write_text("\n".join(log), encoding="utf-8")
-    return 0 if log[-1] == "OK" else 1
-
-
 def main(argv=None):
     argv = sys.argv if argv is None else argv
-    if len(argv) >= 4 and argv[1] == "--selftest":
-        return selftest(argv[2], argv[3])
     if os.name == "nt":
         try:
             import ctypes
@@ -1043,6 +1225,7 @@ def main(argv=None):
         app.setWindowIcon(QIcon(str(ico)))
     win = MainWindow()
     win.show()
+    QTimer.singleShot(300, jobs.warm_up)   # start the worker processes while the user picks a file
     files = [a for a in argv[1:] if not a.startswith("-")]
     if files:
         QTimer.singleShot(0, lambda: win.open_file(files[0]))

@@ -58,6 +58,8 @@ def pyinstaller():
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
            "--name", APP_NAME, "--icon", str(ICON),
            "--add-data", f"{ICON};assets",
+           "--add-data", f"{ICON.with_suffix('.png')};assets",
+           "--add-data", f"{ROOT / 'dlpt' / 'web_page.html'};dlpt",
            "--distpath", str(DIST), "--workpath", str(ROOT / "build"),
            "--specpath", str(ROOT / "build")]
     for m in EXCLUDE:
@@ -76,6 +78,9 @@ def assemble():
     for name in ("README.md", "LICENSE"):
         if (ROOT / name).exists():
             shutil.copy2(ROOT / name, out / name)
+    # Double-click launcher for the browser version (starts the local server, opens the page).
+    (out / f"{APP_NAME} (Web).cmd").write_text(
+        f'@echo off\r\nstart "" "%~dp0{APP_NAME}.exe" --web\r\n', encoding="ascii")
     z = DIST / RELEASE_ASSET
     z.unlink(missing_ok=True)
     with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:

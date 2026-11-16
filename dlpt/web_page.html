@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dl_pdf_tools</title>
+<link rel="icon" href="/icon.png">
+<style>
+:root {
+  --bg: #f3f4f6; --panel: #ffffff; --text: #1d2330; --muted: #5b6170; --line: #d6d9df;
+  --accent: #2f6fe4; --on-accent: #ffffff; --canvas: #e2e4e8; --sel: #dbe6fb; --danger: #c62828;
+  --ok: #2e7d32; --hover: #eceef2; --shadow: 0 1px 4px rgba(0,0,0,.18);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1d22; --panel: #26282f; --text: #e6e7ea; --muted: #a3a8b3; --line: #3a3d46;
+    --accent: #4b8bf5; --on-accent: #ffffff; --canvas: #141518; --sel: #2c4a7c; --danger: #ff7070;
+    --ok: #5cc46a; --hover: #30333b; --shadow: 0 1px 4px rgba(0,0,0,.7);
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.4 "Segoe UI", system-ui, -apple-system, sans-serif;
+       display: flex; flex-direction: column; overflow: hidden; }
+button, input, select { font: inherit; color: inherit; }
+button { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+button:hover:not(:disabled) { background: var(--hover); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button.icon { padding: 5px 9px; min-width: 32px; }
+input[type=text], input[type=number], input[type=password], select {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+input:focus-visible, button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel);
+         border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; margin-right: 6px; }
+header .brand img { width: 22px; height: 22px; }
+header .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+header .grow { flex: 1; }
+#fname { color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#pageNo { width: 56px; text-align: center; }
+#zoomSel { width: 92px; }
+.tools button { font-weight: 600; }
+
+#wrap { flex: 1; display: flex; min-height: 0; }
+aside { width: 190px; flex: none; overflow-y: auto; background: var(--panel); border-right: 1px solid var(--line);
+        padding: 10px 0; }
+.thumb { margin: 0 auto 12px; width: 140px; padding: 6px; border-radius: 8px; cursor: pointer; text-align: center;
+         user-select: none; }
+.thumb:hover { background: var(--hover); }
+.thumb.sel { background: var(--sel); }
+.thumb.current .frame { outline: 2px solid var(--accent); }
+.thumb .frame { background: #fff; box-shadow: var(--shadow); margin: 0 auto; }
+.thumb img { width: 100%; height: 100%; display: block; }
+.thumb span { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+#view { flex: 1; overflow: auto; background: var(--canvas); position: relative; }
+#pages { padding: 18px; display: flex; flex-direction: column; align-items: center; gap: 14px; min-width: min-content; }
+.page { background: #fff; box-shadow: var(--shadow); flex: none; }
+.page img { width: 100%; height: 100%; display: block; }
+#empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+#empty[hidden], [hidden] { display: none !important; }
+#empty .drop { border: 2px dashed var(--line); border-radius: 16px; padding: 48px 56px; text-align: center;
+               color: var(--muted); max-width: 460px; margin: 16px; }
+#empty .drop b { display: block; font-size: 18px; color: var(--text); margin-bottom: 6px; }
+body.dragging #view { outline: 3px dashed var(--accent); outline-offset: -8px; }
+footer { padding: 4px 12px; font-size: 12px; color: var(--muted); background: var(--panel); border-top: 1px solid var(--line);
+         display: flex; justify-content: space-between; gap: 12px; }
+
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text);
+         padding: 20px 22px; width: min(640px, calc(100vw - 32px)); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+dialog::backdrop { background: rgba(0,0,0,.4); }
+dialog h2 { margin: 0 0 4px; font-size: 17px; }
+dialog .sub { color: var(--muted); margin-bottom: 14px; }
+dialog .row { display: flex; align-items: center; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
+dialog .row > input[type=text] { flex: 1; min-width: 180px; }
+dialog .note { color: var(--muted); font-size: 12.5px; margin: 8px 0; }
+dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+dialog .err { color: var(--danger); min-height: 1.4em; margin-top: 6px; }
+dialog .preview { color: var(--muted); margin-top: 6px; }
+label.opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.cp-grid { display: grid; grid-template-columns: 1fr auto; gap: 6px 14px; align-items: center; }
+.cp-est { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cp-custom { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cp-custom input { width: 76px; }
+.cp-summary { font-weight: 600; margin-top: 10px; }
+.cp-dim { opacity: .45; pointer-events: none; }
+.result-big { font-size: 20px; font-weight: 700; margin: 6px 0 4px; }
+.spinner { width: 34px; height: 34px; border: 4px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
+           animation: spin 0.9s linear infinite; margin: 6px auto 14px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#busy { width: 340px; text-align: center; }
+@media (max-width: 760px) {
+  aside { display: none; }
+  #fname, .brand span { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><img src="/icon.png" alt=""><span>dl_pdf_tools</span></div>
+  <button id="openBtn" class="primary" title="Open a PDF (Ctrl+O)">Open PDF</button>
+  <input id="fileInput" type="file" accept="application/pdf,.pdf" hidden>
+  <span id="fname"></span>
+  <div class="sep"></div>
+  <button class="icon needs-doc" id="prevBtn" title="Previous page">▲</button>
+  <input id="pageNo" class="needs-doc" type="text" inputmode="numeric" aria-label="Page number">
+  <span id="pageCount">/ 0</span>
+  <button class="icon needs-doc" id="nextBtn" title="Next page">▼</button>
+  <div class="sep"></div>
+  <button class="icon needs-doc" id="zoomOut" title="Zoom out (Ctrl −)">−</button>
+  <select id="zoomSel" class="needs-doc" aria-label="Zoom"></select>
+  <button class="icon needs-doc" id="zoomIn" title="Zoom in (Ctrl +)">+</button>
+  <div class="sep"></div>
+  <div class="tools" style="display:flex;gap:8px;flex-wrap:wrap">
+    <button class="needs-doc" id="splitBtn">Split</button>
+    <button class="needs-doc" id="extractBtn">Extract pages</button>
+    <button class="needs-doc" id="compressBtn">Reduce size</button>
+  </div>
+  <div class="grow"></div>
+</header>
+
+<div id="wrap">
+  <aside id="thumbs" aria-label="Pages"></aside>
+  <div id="view">
+    <div id="pages"></div>
+    <div id="empty">
+      <div class="drop">
+        <b>Open a PDF to get started</b>
+        Drop a PDF anywhere on this page, or click <i>Open PDF</i>.<br><br>
+        Everything runs on this computer. Your files are never uploaded to the internet,
+        and the original is never changed.
+      </div>
+    </div>
+  </div>
+</div>
+<footer><span id="status">Ready</span><span id="info"></span></footer>
+
+<!-- Split -->
+<dialog id="splitDlg">
+  <h2>Split PDF</h2><div class="sub" data-sub></div>
+  <label class="opt row"><input type="radio" name="splitMode" value="every" checked> Every
+    <input type="number" id="splitN" min="1" value="1" style="width:80px"> pages per file</label>
+  <label class="opt row"><input type="radio" name="splitMode" value="each"> Each page into its own file</label>
+  <div class="row"><label class="opt"><input type="radio" name="splitMode" value="ranges"> Custom ranges</label>
+    <input type="text" id="splitRanges" placeholder="e.g. 1-3, 4-10, 11-"></div>
+  <div class="note">Custom ranges: each comma-separated range becomes one file. Several files download as one .zip.</div>
+  <div class="preview" id="splitPreview"></div>
+  <div class="err" data-err></div>
+  <div class="buttons"><button data-close>Cancel</button><button class="primary" id="splitGo">Split</button></div>
+</dialog>
+
+<!-- Extract -->
+<dialog id="extractDlg">
+  <h2>Extract pages</h2><div class="sub" data-sub></div>
+  <div class="row"><span>Pages:</span><input type="text" id="exPages" placeholder="e.g. 1-3, 5, 8-"></div>
+  <div class="note">Tip: Ctrl- or Shift-click thumbnails to select pages before opening this.</div>
+  <label class="opt row"><input type="radio" name="exMode" value="one" checked> Into one new PDF</label>
+  <label class="opt row"><input type="radio" name="exMode" value="each"> Each page as a separate PDF (downloads as .zip)</label>
+  <div class="row" style="margin-top:12px">
+    <label class="opt"><input type="checkbox" id="exShrink"> Also reduce file size</label>
+    <button id="exShrinkOpts" disabled>Options…</button>
+    <span id="exShrinkInfo" class="cp-est" style="text-align:left"></span>
+  </div>
+  <div class="preview" id="exPreview"></div>
+  <div class="err" data-err></div>
+  <div class="buttons"><button data-close>Cancel</button><button class="primary" id="extractGo">Extract</button></div>
+</dialog>
+
+<!-- Compression options for extract -->
+<dialog id="exOptsDlg">
+  <h2>Reduce size of extracted pages</h2><div class="sub" data-sub></div>
+  <div data-panel></div>
+  <div class="buttons"><button data-close>Cancel</button><button class="primary" id="exOptsOk">OK</button></div>
+</dialog>
+
+<!-- Reduce size -->
+<dialog id="compressDlg">
+  <h2>Reduce file size</h2><div class="sub" data-sub></div>
+  <div data-panel></div>
+  <div class="err" data-err></div>
+  <div class="buttons"><button data-close>Cancel</button><button class="primary" id="compressGo">Compress</button></div>
+</dialog>
+
+<!-- Password -->
+<dialog id="pwDlg">
+  <h2>Password required</h2><div class="sub" data-sub></div>
+  <div class="row"><input type="password" id="pwInput" style="flex:1" autocomplete="off"></div>
+  <div class="err" data-err></div>
+  <div class="buttons"><button data-close>Cancel</button><button class="primary" id="pwGo">Unlock</button></div>
+</dialog>
+
+<!-- Result -->
+<dialog id="resultDlg">
+  <h2 data-title>Done</h2>
+  <div class="result-big" data-big></div>
+  <div class="sub" data-text></div>
+  <div class="buttons"><a id="resultLink" hidden></a><button id="resultAgain">Download again</button>
+    <button class="primary" data-close>Close</button></div>
+</dialog>
+
+<!-- Busy -->
+<dialog id="busy"><div class="spinner"></div><div id="busyText">Working…</div></dialog>
+
+<script>
+"use strict";
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+const $ = (id) => document.getElementById(id);
+const PT = 96 / 72;
+const ZOOMS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
+let doc = null;            // {id, name, size, pages: [[w, h], ...]}
+let zoom = 1, fit = "width", current = 0, lastClick = null;
+const selection = new Set();
+let presets = {};
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("dlpt." + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("dlpt." + k, JSON.stringify(v)); } catch {} },
+};
+
+// ------------------------------------------------------------------ helpers
+async function api(path, body) {
+  const opt = { method: body === undefined ? "GET" : "POST", headers: { "X-Token": TOKEN } };
+  if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
+  const r = await fetch(path, opt);
+  let data = {};
+  try { data = await r.json(); } catch {}
+  if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
+  return data;
+}
+function human(n) {
+  const u = ["B", "KB", "MB", "GB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return i === 0 ? `${n} B` : `${n.toFixed(1)} ${u[i]}`;
+}
+function plural(n, w) { return `${n} ${w}${n === 1 ? "" : "s"}`; }
+function pageUrl(n, w) { return `/api/page?id=${doc.id}&n=${n}&w=${w}&t=${encodeURIComponent(TOKEN)}`; }
+function status(t) { $("status").textContent = t; }
+
+function formatRanges(pages) {
+  const p = [...new Set(pages)].sort((a, b) => a - b); const out = [];
+  for (let i = 0; i < p.length;) {
+    let j = i; while (j + 1 < p.length && p[j + 1] === p[j] + 1) j++;
+    out.push(p[i] === p[j] ? `${p[i] + 1}` : `${p[i] + 1}-${p[j] + 1}`); i = j + 1;
+  }
+  return out.join(", ");
+}
+// Client-side count for the live preview only; the server validates for real.
+function parseGroups(text, count) {
+  const groups = [];
+  for (let raw of text.replace(/;/g, ",").split(",")) {
+    const s = raw.trim().toLowerCase().replace(/\s/g, "").replace(/[–—]/g, "-");
+    if (!s) continue;
+    let a, b;
+    if (s === "all" || s === "*") { a = 1; b = count; }
+    else if (s.includes("-")) {
+      const [l, r] = s.split("-", 2);
+      a = l ? +l : 1; b = (r === "" || r === "end") ? count : +r;
+    } else a = b = +s;
+    if (!Number.isInteger(a) || !Number.isInteger(b)) throw new Error(`'${raw.trim()}' is not a page number or range.`);
+    if (a < 1 || b > count) throw new Error(`'${raw.trim()}' is outside the document (pages 1–${count}).`);
+    if (a > b) throw new Error(`'${raw.trim()}' goes backwards; write the lower page first.`);
+    groups.push([a, b]);
+  }
+  if (!groups.length) throw new Error("Enter some pages, for example 1-3, 5, 8-");
+  return groups;
+}
+function countPages(text, count) {
+  const s = new Set();
+  for (const [a, b] of parseGroups(text, count)) for (let i = a; i <= b; i++) s.add(i);
+  return s.size;
+}
+
+function busy(text) { $("busyText").textContent = text; if (!$("busy").open) $("busy").showModal(); }
+function idle() { if ($("busy").open) $("busy").close(); }
+
+function download(url) {
+  const a = $("resultLink");
+  a.href = url + "?t=" + encodeURIComponent(TOKEN);
+  a.download = "";
+  a.click();
+}
+function showResult(title, big, text, url) {
+  const d = $("resultDlg");
+  d.querySelector("[data-title]").textContent = title;
+  d.querySelector("[data-big]").textContent = big;
+  d.querySelector("[data-text]").textContent = text;
+  $("resultAgain").hidden = !url;
+  $("resultAgain").onclick = () => download(url);
+  d.showModal();
+  if (url) download(url);
+}
+
+document.querySelectorAll("dialog [data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
+$("busy").addEventListener("cancel", (e) => e.preventDefault());
+
+// ------------------------------------------------------------------ open / upload
+$("openBtn").onclick = () => $("fileInput").click();
+$("fileInput").onchange = () => { const f = $("fileInput").files[0]; $("fileInput").value = ""; if (f) openFile(f); };
+
+function upload(file) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", `/api/upload?name=${encodeURIComponent(file.name)}`);
+    x.setRequestHeader("X-Token", TOKEN);
+    x.upload.onprogress = (e) => {
+      if (e.lengthComputable) busy(`Opening ${file.name}… ${Math.round(100 * e.loaded / e.total)}%`);
+    };
+    x.onload = () => {
+      let data = {}; try { data = JSON.parse(x.responseText); } catch {}
+      x.status === 200 ? resolve(data) : reject(new Error(data.error || `Upload failed (${x.status})`));
+    };
+    x.onerror = () => reject(new Error("Upload failed. Is the dl_pdf_tools web server still running?"));
+    x.send(file);
+  });
+}
+
+async function openFile(file) {
+  if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") { alert(`${file.name} is not a PDF.`); return; }
+  busy(`Opening ${file.name}…`);
+  let info;
+  try { info = await upload(file); }
+  catch (e) { idle(); alert(e.message); return; }
+  idle();
+  if (info.locked) {
+    info = await askPassword(info);   // cancelling forgets the upload
+    if (!info) return;
+  }
+  if (doc) api("/api/forget", { ids: [doc.id] }).catch(() => {});
+  load(info);
+}
+
+function askPassword(info) {
+  return new Promise((resolve) => {
+    const d = $("pwDlg");
+    d.querySelector("[data-sub]").textContent = `${info.name} is protected. Enter its password to open it.`;
+    d.querySelector("[data-err]").textContent = "";
+    $("pwInput").value = "";
+    let done = false;
+    $("pwGo").onclick = async () => {
+      try {
+        const r = await api("/api/unlock", { id: info.id, password: $("pwInput").value });
+        done = true; d.close(); resolve(r);
+      } catch (e) { d.querySelector("[data-err]").textContent = e.message; }
+    };
+    $("pwInput").onkeydown = (e) => { if (e.key === "Enter") $("pwGo").click(); };
+    d.onclose = () => { if (!done) { api("/api/forget", { ids: [info.id] }).catch(() => {}); resolve(null); } };
+    d.showModal();
+  });
+}
+
+// ------------------------------------------------------------------ viewer
+const view = $("view"), pagesEl = $("pages"), thumbsEl = $("thumbs");
+let pageEls = [], tops = [];
+
+const io = new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting) paint(e.target);
+}, { root: view, rootMargin: "1200px 0px" });
+
+function wantWidth(el) {
+  const w = parseFloat(el.style.width) * (window.devicePixelRatio || 1);
+  return Math.min(3000, Math.max(100, Math.ceil(w / 100) * 100));
+}
+function paint(el) {
+  const w = wantWidth(el);
+  if (+el.dataset.w === w) return;
+  el.dataset.w = w;
+  const img = el.firstChild;
+  const next = new Image();
+  next.onload = () => { if (+el.dataset.w === w) img.src = next.src; };   // ignore a slower, older size
+  next.src = pageUrl(+el.dataset.n, w);
+}
+
+function load(info) {
+  doc = info;
+  selection.clear(); lastClick = null; current = 0;
+  $("fname").textContent = info.name;
+  document.title = `${info.name} — dl_pdf_tools`;
+  $("pageCount").textContent = `/ ${info.pages.length}`;
+  $("info").textContent = `${plural(info.pages.length, "page")} · ${human(info.size)}`;
+  $("empty").hidden = true;
+  document.querySelectorAll(".needs-doc").forEach((b) => (b.disabled = false));
+  io.disconnect();
+  pagesEl.innerHTML = ""; thumbsEl.innerHTML = "";
+  pageEls = info.pages.map(([w, h], i) => {
+    const d = document.createElement("div");
+    d.className = "page"; d.dataset.n = i;
+    d.appendChild(document.createElement("img")).alt = `Page ${i + 1}`;
+    pagesEl.appendChild(d);
+    const t = document.createElement("div");
+    t.className = "thumb"; t.dataset.n = i;
+    const s = Math.min(128 / w, 180 / h);
+    t.innerHTML = `<div class="frame" style="width:${Math.round(w * s)}px;height:${Math.round(h * s)}px">` +
+      `<img loading="lazy" alt="" src="${pageUrl(i, 260)}"></div><span>${i + 1}</span>`;
+    t.addEventListener("click", (e) => thumbClick(i, e));
+    thumbsEl.appendChild(t);
+    return d;
+  });
+  fit = "width";
+  requestAnimationFrame(() => { applyZoom(); view.scrollTop = 0; setCurrent(0); });   // after the layout settles
+  status(`Opened ${info.name}`);
+}
+
+function fitZoom() {
+  if (!doc) return 1;
+  const maxW = Math.max(...doc.pages.map((p) => p[0]));
+  const vw = view.clientWidth - 40;
+  if (fit === "page") {
+    const [w, h] = doc.pages[current];
+    return Math.min(vw / (w * PT), (view.clientHeight - 40) / (h * PT));
+  }
+  return vw / (maxW * PT);
+}
+
+function applyZoom(newZoom) {
+  if (!doc) return;
+  const anchor = current, frac = pageEls.length ? (view.scrollTop - pageEls[anchor].offsetTop) / pageEls[anchor].offsetHeight : 0;
+  if (newZoom !== undefined) { zoom = Math.max(0.1, Math.min(6, newZoom)); fit = null; }
+  else if (fit) zoom = Math.max(0.1, Math.min(6, fitZoom()));
+  doc.pages.forEach(([w, h], i) => {
+    pageEls[i].style.width = `${Math.round(w * zoom * PT)}px`;
+    pageEls[i].style.height = `${Math.round(h * zoom * PT)}px`;
+  });
+  tops = pageEls.map((el) => el.offsetTop);
+  view.scrollTop = pageEls[anchor].offsetTop + frac * pageEls[anchor].offsetHeight;
+  io.disconnect(); pageEls.forEach((el) => io.observe(el));
+  const sel = $("zoomSel");
+  const pct = Math.round(zoom * 100);
+  sel.innerHTML = "";
+  for (const [v, label] of [["fitw", "Fit width"], ["fitp", "Fit page"]]) sel.add(new Option(label, v));
+  if (!ZOOMS.some((z) => Math.round(z * 100) === pct)) sel.add(new Option(`${pct}%`, `z${zoom}`));
+  for (const z of ZOOMS) sel.add(new Option(`${Math.round(z * 100)}%`, `z${z}`));
+  sel.value = fit === "width" ? "fitw" : fit === "page" ? "fitp" : `z${ZOOMS.find((z) => Math.round(z * 100) === pct) ?? zoom}`;
+}
+
+$("zoomSel").onchange = () => {
+  const v = $("zoomSel").value;
+  if (v === "fitw" || v === "fitp") { fit = v === "fitw" ? "width" : "page"; applyZoom(); }
+  else applyZoom(parseFloat(v.slice(1)));
+};
+function zoomStep(dir) {
+  const z = dir > 0 ? (ZOOMS.find((v) => v > zoom + 1e-3) ?? ZOOMS.at(-1)) : ([...ZOOMS].reverse().find((v) => v < zoom - 1e-3) ?? ZOOMS[0]);
+  applyZoom(z);
+}
+$("zoomIn").onclick = () => zoomStep(1);
+$("zoomOut").onclick = () => zoomStep(-1);
+view.addEventListener("wheel", (e) => {
+  if (!doc || !e.ctrlKey) return;
+  e.preventDefault(); zoomStep(e.deltaY < 0 ? 1 : -1);
+}, { passive: false });
+new ResizeObserver(() => { if (doc && fit) applyZoom(); }).observe(view);
+
+function goTo(i) {
+  if (!doc) return;
+  i = Math.max(0, Math.min(doc.pages.length - 1, i));
+  view.scrollTop = pageEls[i].offsetTop - 9;
+  setCurrent(i);
+}
+function setCurrent(i) {
+  current = i;
+  if (document.activeElement !== $("pageNo")) $("pageNo").value = i + 1;
+  thumbsEl.querySelectorAll(".thumb.current").forEach((t) => t.classList.remove("current"));
+  const t = thumbsEl.children[i];
+  if (t) {
+    t.classList.add("current");
+    const r = t.getBoundingClientRect(), a = thumbsEl.getBoundingClientRect();
+    if (r.top < a.top || r.bottom > a.bottom) t.scrollIntoView({ block: "nearest" });
+  }
+}
+view.addEventListener("scroll", () => {
+  if (!doc) return;
+  const y = view.scrollTop + view.clientHeight / 3;
+  let lo = 0, hi = tops.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (tops[mid] <= y) lo = mid; else hi = mid - 1; }
+  if (lo !== current) setCurrent(lo);
+});
+$("prevBtn").onclick = () => goTo(current - 1);
+$("nextBtn").onclick = () => goTo(current + 1);
+$("pageNo").onkeydown = (e) => { if (e.key === "Enter") { goTo(parseInt($("pageNo").value, 10) - 1); $("pageNo").blur(); } };
+$("pageNo").onblur = () => ($("pageNo").value = current + 1);
+
+function thumbClick(i, e) {
+  if (e.shiftKey && lastClick !== null) {
+    if (!e.ctrlKey && !e.metaKey) selection.clear();
+    for (let k = Math.min(i, lastClick); k <= Math.max(i, lastClick); k++) selection.add(k);
+  } else if (e.ctrlKey || e.metaKey) {
+    selection.has(i) ? selection.delete(i) : selection.add(i);
+    lastClick = i;
+  } else {
+    selection.clear(); selection.add(i); lastClick = i; goTo(i);
+  }
+  [...thumbsEl.children].forEach((t, k) => t.classList.toggle("sel", selection.has(k)));
+  status(selection.size > 1 ? `${selection.size} pages selected — use Extract pages to save them` : "");
+}
+
+// ------------------------------------------------------------------ drag & drop, keys, lifetime
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => { e.preventDefault(); dragDepth++; document.body.classList.add("dragging"); });
+window.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove("dragging"); } });
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => {
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove("dragging");
+  const f = [...(e.dataTransfer?.files || [])].find((f) => /\.pdf$/i.test(f.name) || f.type === "application/pdf");
+  if (f) openFile(f); else if (e.dataTransfer?.files?.length) alert("Drop a PDF file.");
+});
+window.addEventListener("keydown", (e) => {
+  if (document.querySelector("dialog[open]")) return;
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key.toLowerCase() === "o") { e.preventDefault(); $("openBtn").click(); }
+  else if (!doc) return;
+  else if (mod && (e.key === "=" || e.key === "+")) { e.preventDefault(); zoomStep(1); }
+  else if (mod && e.key === "-") { e.preventDefault(); zoomStep(-1); }
+  else if (mod && e.key === "0") { e.preventDefault(); fit = "width"; applyZoom(); }
+  else if (e.target.tagName !== "INPUT" && (e.key === "Home" || e.key === "End")) { e.preventDefault(); goTo(e.key === "Home" ? 0 : 1e9); }
+});
+setInterval(() => api("/api/heartbeat").catch(() => status("The dl_pdf_tools web server has stopped. Start it again with the (Web) launcher.")), 15000);
+window.addEventListener("pagehide", () => {
+  if (doc) navigator.sendBeacon(`/api/forget?t=${encodeURIComponent(TOKEN)}`,
+    new Blob([JSON.stringify({ ids: [doc.id] })], { type: "application/json" }));
+});
+
+// ------------------------------------------------------------------ compression options panel
+let panelSeq = 0;
+function CompressPanel(root, pagesText) {
+  const uid = ++panelSeq, saved = store.get("compress", {});
+  const keys = [...Object.keys(presets), "custom"];
+  root.innerHTML = `
+    <div class="cp-grid">
+      ${Object.entries(presets).map(([k, p]) => `
+        <label class="opt cp-choice"><input type="radio" name="cp${uid}" value="${k}"> ${p.label}
+          <span class="cp-est" style="text-align:left">(${p.dpi} dpi, quality ${p.quality})</span></label>
+        <span class="cp-est" data-est="${k}"></span>`).join("")}
+      <div class="cp-custom cp-choice"><label class="opt"><input type="radio" name="cp${uid}" value="custom"> Custom</label>
+        <input type="number" data-dpi min="36" max="600" step="1"> dpi
+        <input type="number" data-q min="10" max="100" step="1"> quality</div>
+      <span class="cp-est" data-est="custom"></span>
+    </div>
+    <div class="note">Pictures and scans larger than the chosen resolution are scaled down and re-saved as JPEG.
+      Text and vector graphics stay sharp. Fonts are trimmed to the characters used and unused data is removed.</div>
+    <label class="opt row"><input type="checkbox" data-gray> Convert images to black &amp; white (grayscale)</label>
+    <label class="opt row"><input type="checkbox" data-meta> Remove document properties (title, author, …)</label>
+    <label class="opt row"><input type="checkbox" data-noimg> Don't touch images (lossless only)</label>
+    <div class="cp-summary" data-summary></div>`;
+  const q = (s) => root.querySelector(s);
+  const radios = [...root.querySelectorAll(`input[name=cp${uid}]`)];
+  const dpi = q("[data-dpi]"), qual = q("[data-q]"), gray = q("[data-gray]"), meta = q("[data-meta]"), noimg = q("[data-noimg]");
+  (radios.find((r) => r.value === saved.preset) || radios.find((r) => r.value === "balanced")).checked = true;
+  dpi.value = saved.dpi || 150; qual.value = saved.quality || 72;
+  gray.checked = !!saved.gray; meta.checked = !!saved.meta; noimg.checked = !!saved.no_img;
+
+  const est = {}, gen = {};
+  let dead = false, timer = null;
+  const preset = () => radios.find((r) => r.checked).value;
+  const key = () => (noimg.checked ? "lossless" : preset());
+  const clampInt = (el, lo, hi, d) => { const v = parseInt(el.value, 10); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d; };
+  const opts = (k) => ({ preset: k === "lossless" ? "balanced" : k, dpi: clampInt(dpi, 36, 600, 150),
+    quality: clampInt(qual, 10, 100, 72), gray: gray.checked, strip_meta: meta.checked, images: k !== "lossless" });
+  const label = (k, t) => { const el = root.querySelector(`[data-est="${k}"]`); if (el) el.textContent = t; };
+  const fmt = (r) => r.size >= r.base ? "no smaller" : `≈ ${human(r.size)}  (−${Math.round(100 * (1 - r.size / r.base))}%)`;
+
+  function summary() {
+    const r = est[key()];
+    const what = pagesText ? "Estimated size of the extracted file" : "Estimated size";
+    const el = q("[data-summary]");
+    if (!r) el.textContent = `${what}: estimating…`;
+    else if (r.size >= r.base) el.textContent = `${what}: can't get smaller than ${human(r.base)} with these settings`;
+    else el.textContent = `${what}: ≈ ${human(r.size)}  (from ${human(r.base)}, ${Math.round(100 * (1 - r.size / r.base))}% smaller)`;
+  }
+  async function estimate(k) {
+    const g = (gen[k] = (gen[k] || 0) + 1);
+    delete est[k]; label(k, "estimating…"); summary();
+    try {
+      const r = await api("/api/estimate", { id: doc.id, opts: opts(k), pages: pagesText || null });
+      if (dead || gen[k] !== g) return;
+      est[k] = r; label(k, fmt(r)); summary();
+    } catch (e) { if (!dead && gen[k] === g) label(k, "—"); }
+  }
+  function enable() {
+    root.querySelectorAll(".cp-choice, [data-est], [data-gray]").forEach((el) =>
+      (el.closest("label") || el).classList.toggle("cp-dim", noimg.checked));
+  }
+  function all() {
+    if (noimg.checked) { keys.forEach((k) => label(k, "")); estimate("lossless"); }
+    else keys.forEach(estimate);
+  }
+  radios.forEach((r) => r.addEventListener("change", summary));
+  for (const el of [dpi, qual]) el.addEventListener("input", () => {
+    radios.find((r) => r.value === "custom").checked = true;
+    label("custom", "…"); delete est.custom; summary();
+    clearTimeout(timer); timer = setTimeout(() => estimate("custom"), 500);
+  });
+  for (const el of [gray, meta, noimg]) el.addEventListener("change", () => { enable(); all(); });
+  enable(); all();
+
+  return {
+    options: () => opts(key()),
+    remember() {
+      const v = { preset: preset(), dpi: clampInt(dpi, 36, 600, 150), quality: clampInt(qual, 10, 100, 72),
+                  gray: gray.checked, meta: meta.checked, no_img: noimg.checked };
+      store.set("compress", v); return v;
+    },
+    describe() {
+      const k = key(), r = est[k];
+      const name = k === "lossless" ? "Lossless" : k === "custom" ? "Custom" : presets[k].label.split(" –")[0];
+      return r ? `${name} · ≈ ${human(r.size)}` : name;
+    },
+    cancel() { dead = true; clearTimeout(timer); },
+  };
+}
+
+// ------------------------------------------------------------------ Split
+$("splitBtn").onclick = () => {
+  const d = $("splitDlg"), n = doc.pages.length;
+  d.querySelector("[data-sub]").textContent = `${doc.name} — ${plural(n, "page")}`;
+  d.querySelector("[data-err]").textContent = "";
+  $("splitN").max = n; $("splitN").value = n > 1 ? Math.min(Math.max(1, n >> 1), 10) : 1;
+  splitPreview(); d.showModal();
+};
+function splitMode() { return document.querySelector("input[name=splitMode]:checked").value; }
+function splitPreview() {
+  const n = doc.pages.length, el = $("splitPreview"); let files;
+  try {
+    const m = splitMode();
+    if (m === "every") files = Math.ceil(n / Math.max(1, parseInt($("splitN").value, 10) || 1));
+    else if (m === "each") files = n;
+    else files = parseGroups($("splitRanges").value, n).length;
+    el.textContent = `→ ${plural(files, "file")}`; el.style.color = ""; $("splitGo").disabled = false;
+  } catch (e) { el.textContent = e.message; el.style.color = "var(--danger)"; $("splitGo").disabled = true; }
+}
+$("splitN").oninput = () => { document.querySelector("input[name=splitMode][value=every]").checked = true; splitPreview(); };
+$("splitRanges").oninput = () => { document.querySelector("input[name=splitMode][value=ranges]").checked = true; splitPreview(); };
+document.querySelectorAll("input[name=splitMode]").forEach((r) => r.addEventListener("change", splitPreview));
+$("splitGo").onclick = async () => {
+  const d = $("splitDlg");
+  const body = { id: doc.id, mode: splitMode(), n: parseInt($("splitN").value, 10) || 1, ranges: $("splitRanges").value };
+  d.close(); busy("Splitting…");
+  try {
+    const r = await api("/api/split", body);
+    idle();
+    showResult("Split PDF", `${plural(r.files, "file")} created`,
+      `Downloading ${r.name} (${human(r.size)}). Look in your browser's Downloads.`, r.url);
+  } catch (e) { idle(); d.showModal(); d.querySelector("[data-err]").textContent = e.message; }
+};
+
+// ------------------------------------------------------------------ Extract
+let exOpts = null;   // chosen compression options (null = not chosen yet)
+$("extractBtn").onclick = () => {
+  const d = $("extractDlg");
+  d.querySelector("[data-sub]").textContent = `${doc.name} — ${plural(doc.pages.length, "page")}`;
+  d.querySelector("[data-err]").textContent = "";
+  $("exPages").value = formatRanges(selection.size > 1 ? [...selection] : [current]);
+  $("exShrink").checked = false; $("exShrinkOpts").disabled = true; $("exShrinkInfo").textContent = ""; exOpts = null;
+  exPreview(); d.showModal();
+};
+function exPreview() {
+  const el = $("exPreview");
+  try {
+    const n = countPages($("exPages").value, doc.pages.length);
+    const each = document.querySelector("input[name=exMode]:checked").value === "each";
+    el.textContent = `→ ${plural(n, "page")}` + (each ? ` in ${plural(n, "file")}` : "");
+    el.style.color = ""; $("extractGo").disabled = false;
+  } catch (e) { el.textContent = e.message; el.style.color = "var(--danger)"; $("extractGo").disabled = true; }
+  if (exOpts && $("exPages").value !== exOpts.pagesText) $("exShrinkInfo").textContent = exOpts.describe.split(" · ")[0];
+}
+$("exPages").oninput = exPreview;
+document.querySelectorAll("input[name=exMode]").forEach((r) => r.addEventListener("change", exPreview));
+$("exShrink").onchange = async () => {
+  const on = $("exShrink").checked;
+  $("exShrinkOpts").disabled = !on;
+  $("exShrinkInfo").hidden = !on;
+  if (on && !exOpts && !(await chooseExtractOptions())) { $("exShrink").checked = false; $("exShrinkOpts").disabled = true; }
+};
+$("exShrinkOpts").onclick = () => chooseExtractOptions();
+
+function chooseExtractOptions() {
+  return new Promise((resolve) => {
+    const pagesText = $("exPages").value;
+    let n;
+    try { n = countPages(pagesText, doc.pages.length); }
+    catch (e) { $("extractDlg").querySelector("[data-err]").textContent = e.message; return resolve(false); }
+    const d = $("exOptsDlg");
+    d.querySelector("[data-sub]").textContent = `${doc.name} — ${plural(n, "page")} to extract`;
+    const panel = CompressPanel(d.querySelector("[data-panel]"), pagesText);
+    let ok = false;
+    $("exOptsOk").onclick = () => {
+      ok = true; panel.remember();
+      exOpts = { opts: panel.options(), describe: panel.describe(), pagesText };
+      $("exShrinkInfo").textContent = exOpts.describe;
+      d.close();
+    };
+    d.onclose = () => { panel.cancel(); resolve(ok); };
+    d.showModal();
+  });
+}
+$("extractGo").onclick = async () => {
+  const d = $("extractDlg");
+  const each = document.querySelector("input[name=exMode]:checked").value === "each";
+  const body = { id: doc.id, pages: $("exPages").value, separate: each,
+                 compress: $("exShrink").checked && exOpts ? exOpts.opts : null };
+  d.close(); busy("Extracting pages…");
+  try {
+    const r = await api("/api/extract", body);
+    idle();
+    const n = countPages(body.pages, doc.pages.length);
+    showResult("Extract pages", each ? `${plural(r.files, "file")} created` : `${plural(n, "page")} extracted`,
+      `Downloading ${r.name} (${human(r.size)}). Look in your browser's Downloads.`, r.url);
+  } catch (e) { idle(); d.showModal(); d.querySelector("[data-err]").textContent = e.message; }
+};
+
+// ------------------------------------------------------------------ Reduce size
+let compressPanel = null;
+$("compressBtn").onclick = () => {
+  const d = $("compressDlg");
+  d.querySelector("[data-sub]").textContent = `${doc.name} — currently ${human(doc.size)}`;
+  d.querySelector("[data-err]").textContent = "";
+  compressPanel = CompressPanel(d.querySelector("[data-panel]"), null);
+  d.onclose = () => compressPanel && compressPanel.cancel();
+  d.showModal();
+};
+$("compressGo").onclick = async () => {
+  const d = $("compressDlg");
+  const opts = compressPanel.options();
+  compressPanel.remember();
+  d.close(); busy("Compressing…");
+  try {
+    const r = await api("/api/compress", { id: doc.id, opts });
+    idle();
+    if (!r.written) {
+      showResult("Reduce file size", "Already well optimised",
+        `${doc.name} (${human(r.before)}) couldn't be made smaller with these settings, so nothing was downloaded. ` +
+        "Try the Strong preset or a lower custom resolution.", null);
+    } else {
+      showResult("Reduce file size", `${human(r.before)} → ${human(r.after)}  (${Math.round(100 * (1 - r.after / r.before))}% smaller)`,
+        `Downloading ${r.name}. Look in your browser's Downloads.`, r.url);
+    }
+  } catch (e) { idle(); d.showModal(); d.querySelector("[data-err]").textContent = e.message; }
+};
+
+// ------------------------------------------------------------------ start
+document.querySelectorAll(".needs-doc").forEach((b) => (b.disabled = true));
+api("/api/info").then((i) => { presets = i.presets; $("info").textContent = `v${i.version}`; })
+  .catch(() => status("Can't reach the dl_pdf_tools web server. Start it with the (Web) launcher."));
+</script>
+</body>
+</html>

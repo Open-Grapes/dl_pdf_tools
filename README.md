@@ -9,7 +9,8 @@ No editing; your original files are never changed. Every tool writes a new file.
 - **Pages panel (F4):** thumbnails. Click one to jump to that page. Use Ctrl/Shift + click to select several pages, then right-click → *Extract selected pages* or *Split after page N*.
 - **Split (Ctrl+Shift+S):** every N pages, one file per page, or custom ranges (`1-3, 4-10, 11-`; each range becomes one file).
 - **Extract pages (Ctrl+E):** pick pages such as `1-3, 5, 8-` and save them into one new PDF, or one PDF per page.
-- **Reduce size (Ctrl+R):**
+  Tick **Also reduce file size** to choose a Reduce size setting for the extracted pages, with a size estimate.
+- **Reduce size (Ctrl+R):** every choice shows its **estimated file size** before you compress.
   - **Light:** images capped at 220 dpi, JPEG quality 85. You won't notice a difference.
   - **Balanced:** 150 dpi, quality 72. Good for sharing by email.
   - **Strong:** 96 dpi, quality 55. Smallest file. Fine on screen, rough when printed.
@@ -19,6 +20,18 @@ No editing; your original files are never changed. Every tool writes a new file.
   Text and vector graphics stay sharp. The tool also trims embedded fonts and removes unused data.
   If the PDF can't be made smaller, it tells you and writes no file.
 - **Zoom:** Ctrl + mouse wheel, `Ctrl +` / `Ctrl −`, `Ctrl+0` fit width, `Ctrl+9` fit page.
+
+Size estimates are exact for small PDFs (up to 8 pages). For bigger ones the tool compresses a sample of pages and
+scales the result up, which is usually within a few percent.
+
+## Web version (in your browser)
+
+Double-click **`dl_pdf_tools (Web).cmd`** in the app folder, or run `dl_pdf_tools.exe --web`. Your browser opens a
+page with the same viewer and tools. Results arrive as downloads; several files come as one .zip.
+
+It all runs on your own computer. The page talks to a small server that only this PC can reach (127.0.0.1),
+protected by a random key for each session. Your PDFs never go to the internet. The server stops by itself a
+minute after you close the page.
 
 ## Run from source
 

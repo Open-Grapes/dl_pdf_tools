@@ -15,6 +15,7 @@ import os
 import secrets
 import shutil
 import socket
+import socketserver
 import threading
 import time
 import urllib.parse
@@ -58,6 +59,12 @@ class Server(ThreadingHTTPServer):
         super().__init__(("0.0.0.0" if wifi_hosts else "127.0.0.1", port), Handler)
         self.token, self.work, self.wifi_hosts = token, work, wifi_hosts
         self.quit_key = secrets.token_urlsafe(24)
+
+    def server_bind(self):
+        # HTTPServer.server_bind() looks up the machine's network name (socket.getfqdn), which can hang
+        # for a long time on Macs whose name doesn't resolve. That name is never used here, so skip it.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
         self.last_seen = time.time()
         self.lock = threading.Lock()
         self.render_lock = threading.Lock()   # MuPDF is not thread-safe: one render at a time in this process
@@ -403,6 +410,7 @@ def serve_wifi(parent_pid=None):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     crash_log = open(CONFIG_DIR / "wifi.log", "w", encoding="utf-8")
     faulthandler.enable(crash_log)
+    faulthandler.dump_traceback_later(15, file=crash_log)   # if starting up ever hangs, record where
     try:
         return _serve_wifi(parent_pid)
     except BaseException as e:
@@ -445,6 +453,8 @@ def _serve_wifi(parent_pid):
         os.replace(tmp, WIFI_STATE)
 
     write_state()   # the IP address works right away
+    import faulthandler
+    faulthandler.cancel_dump_traceback_later()   # started fine
     closers = []
 
     def announce():   # the .local name follows when mDNS is ready; it can be slow or blocked on some networks

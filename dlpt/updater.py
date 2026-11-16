@@ -124,6 +124,7 @@ def latest():
         "version": str(data.get("tag_name", "")).lstrip("vV"),
         "notes": data.get("body") or "",
         "page": data.get("html_url") or RELEASES_PAGE,
+        "date": str(data.get("published_at") or data.get("created_at") or "")[:10],
         "asset": {"name": want, "size": asset.get("size", 0), "url": asset.get("browser_download_url"),
                   "api_url": asset.get("url")} if asset else None,
         "token": token,

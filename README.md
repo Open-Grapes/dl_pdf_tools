@@ -40,11 +40,13 @@ scales the result up, which is usually within a few percent.
 
 ## Updates
 
-Click **Check for updates** (top right). The app asks GitHub for the newest release:
+Click **Check for updates** (top right). The window shows your version, the latest version on GitHub with its
+release date, and that release's *What's new* notes:
 
-- If you already have it, it says *dl_pdf_tools is up to date*.
-- If there's a newer one, it shows what's new. **Update now** downloads it, closes the app, swaps in the new
-  version and opens it again. Your settings are kept.
+- If you already have it, it says *You're on the latest version* ✔ and *Everything is up to date*.
+- If there's a newer one, it says *Version X is available*. **Update now** downloads it (with a progress bar),
+  closes the app, swaps in the new version and opens it again. Your settings are kept.
+- **Check again** asks GitHub again. **Release page** opens the release on GitHub.
 
 It also checks quietly once a day and shows *Update available* in the status bar. You can switch this off in the
 Check for updates window.
@@ -91,9 +93,9 @@ py -3.13 -m venv .venv
 
 ## Publishing a new version
 
-1. Raise `APP_VERSION` in `dlpt/common.py` (e.g. `1.4.0` → `1.5.0`).
+1. Raise `APP_VERSION` in `dlpt/common.py` (e.g. `1.5.0` → `1.6.0`).
 2. Build Windows with `build.py`; push to `main` so GitHub Actions builds the two Mac `.dmg` files.
-3. Create a GitHub release tagged `v1.5.0` with `dl_pdf_tools-windows.zip`,
+3. Create a GitHub release tagged `v1.6.0` with `dl_pdf_tools-windows.zip`,
    `dl_pdf_tools-mac-apple-silicon.dmg` and `dl_pdf_tools-mac-intel.dmg` attached (keep these exact names: the
    updater looks for them). The release notes are what users see under "What's new".
 

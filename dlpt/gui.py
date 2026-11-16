@@ -1301,54 +1301,89 @@ class _Worker(QThread):
 
 
 class UpdateDialog(QDialog):
-    """Check for updates: up to date, or show what's new and update in place."""
+    """Check for updates: this version, the latest on GitHub, what's new, and Update now / Check again /
+    Release page."""
 
     def __init__(self, parent, settings, info=None):
         super().__init__(parent)
         self.setWindowTitle("Check for updates")
         self.settings, self.info, self.worker = settings, info, None
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 16, 18, 14)
+        lay.setSpacing(8)
+        self.title = QLabel(f"{APP_NAME} {APP_VERSION}  (this version)")
+        self.title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        lay.addWidget(self.title)
+        lay.addSpacing(4)
         self.head = QLabel()
-        self.head.setStyleSheet("font-size: 15px; font-weight: 600;")
         self.head.setWordWrap(True)
         lay.addWidget(self.head)
-        self.text = QLabel()
-        self.text.setWordWrap(True)
-        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        self.text.setOpenExternalLinks(True)
-        lay.addWidget(self.text)
+        self.sub = QLabel()
+        self.sub.setWordWrap(True)
+        self.sub.setForegroundRole(QPalette.ColorRole.PlaceholderText)
+        lay.addWidget(self.sub)
         self.notes = QTextBrowser()
         self.notes.setOpenExternalLinks(True)
-        self.notes.setMinimumHeight(220)
-        self.notes.hide()
+        self.notes.setMinimumHeight(240)
         lay.addWidget(self.notes, 1)
-        self.bar = QProgressBar()
-        self.bar.hide()
-        lay.addWidget(self.bar)
         self.auto = QCheckBox("Check for updates automatically (once a day)")
         self.auto.setChecked(settings.get("auto_update", True))
         self.auto.toggled.connect(lambda on: self.settings.__setitem__("auto_update", on))
         lay.addWidget(self.auto)
-        self.buttons = QDialogButtonBox()
-        self.b_update = self.buttons.addButton("Update now", QDialogButtonBox.ButtonRole.AcceptRole)
-        self.b_page = self.buttons.addButton("View on GitHub", QDialogButtonBox.ButtonRole.ActionRole)
-        self.b_close = self.buttons.addButton(QDialogButtonBox.StandardButton.Close)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        self.bar = QProgressBar()
+        self._bar_idle()
+        lay.addWidget(self.bar)
+        row = QHBoxLayout()
+        self.b_update = QPushButton("Update now")
+        self.b_again = QPushButton("Check again")
+        self.b_page = QPushButton("Release page")
+        self.b_close = QPushButton("Close")
+        for b in (self.b_update, self.b_again, self.b_page):
+            b.setAutoDefault(False)
+            row.addWidget(b)
+        row.addStretch(1)
+        row.addWidget(self.b_close)
+        lay.addLayout(row)
         self.b_update.clicked.connect(self.start_update)
+        self.b_again.clicked.connect(self.check)
         self.b_page.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(
             (self.info or {}).get("page") or updater.RELEASES_PAGE)))
         self.b_close.clicked.connect(self.reject)
-        lay.addWidget(self.buttons)
-        self.setMinimumWidth(520)
+        self.b_close.setDefault(True)
+        self.resize(640, 560)
         if info:
             self._show(info)
         else:
             self.check()
 
+    def _bar_idle(self, value=0):
+        self.bar.setRange(0, 1000)
+        self.bar.setValue(value)
+        self.bar.setTextVisible(False)
+
+    def _headline(self, text, kind=None):
+        dark = self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        colors = {"ok": ("#1a7f37", "#4cc76a"), "new": ("#0969da", "#58a6ff"), "bad": ("#cf222e", "#ff7b72")}
+        color = f"color: {colors[kind][dark]};" if kind else ""
+        self.head.setStyleSheet(f"font-size: 17px; font-weight: 600; {color}")
+        self.head.setText(text)
+
+    def _set_busy(self, busy):
+        self.b_again.setEnabled(not busy)
+        if busy:
+            self.b_update.setEnabled(False)
+
     def check(self):
-        self.head.setText("Checking for updates…")
-        self.text.setText(f"You have version {APP_VERSION}.")
-        self.b_update.hide()
-        self.b_page.hide()
+        if self.worker is not None and self.worker.isRunning():
+            return
+        self._headline("Checking for updates…")
+        self.sub.setText("Asking GitHub for the latest version.")
+        self.status.setText("")
+        self.bar.setRange(0, 0)   # busy
+        self._set_busy(True)
         self.worker = _Worker(lambda _r: updater.latest(), self)
         self.worker.done.connect(self._show)
         self.worker.failed.connect(self._failed)
@@ -1357,37 +1392,48 @@ class UpdateDialog(QDialog):
     def _show(self, info):
         self.info = info
         self.settings["last_update_check"] = time.time()
-        if not updater.is_newer(info["version"]):
-            self.head.setText("✅ dl_pdf_tools is up to date")
-            self.text.setText(f"You have the latest version, {APP_VERSION}.")
-            self.b_update.hide()
-            self.b_page.hide()
-            self.adjustSize()
+        self._bar_idle()
+        self._set_busy(False)
+        ver = info["version"]
+        line = f"Latest on GitHub: {ver}"
+        if info.get("date"):
+            line += f", released {info['date']}"
+        if info.get("token"):
+            line += "  ·  checked with this PC's GitHub login (private repo)"
+        self.sub.setText(line)
+        notes = (info.get("notes") or "").strip() or "_No release notes._"
+        self.notes.setMarkdown(f"**What's new in {ver}:**\n\n{notes}")
+        if not updater.is_newer(ver):
+            self._headline(f"You're on the latest version ({APP_VERSION}) ✔", "ok")
+            self.status.setText("Everything is up to date.")
+            self.b_update.setEnabled(False)
             return
-        self.head.setText(f"⬆ Version {info['version']} is available")
-        self.text.setText(f"You have version {APP_VERSION}. What's new:")
-        self.notes.setMarkdown(info["notes"] or "_No release notes._")
-        self.notes.show()
+        self._headline(f"Version {ver} is available", "new")
         ok, why = updater.can_install()
         if not info.get("asset"):
             ok, why = False, f"The new version has no download for this computer ({updater.asset_name()})."
-        self.b_page.show()
-        self.b_update.setVisible(ok)
-        if not ok:
-            self.text.setText(self.text.text() + f"<br><i>{why}</i>")
-        self.resize(max(self.width(), 600), 520)
+        self.b_update.setEnabled(ok)
+        if ok:
+            size = info["asset"].get("size")
+            self.status.setText(f"Update now downloads {human_size(size) if size else 'it'}, closes {APP_NAME}, "
+                                f"installs {ver} and opens it again. Your settings are kept.")
+        else:
+            self.status.setText(f"{why} Use Release page to download it yourself.")
 
     def _failed(self, msg):
-        self.head.setText("Couldn't check for updates")
-        self.text.setText(msg)
-        self.b_page.show()
-        self.b_update.hide()
+        self._bar_idle()
+        self._set_busy(False)
+        self._headline("Couldn't check for updates", "bad")
+        self.sub.setText("")
+        self.status.setText(msg)
+        if not self.info:
+            self.notes.clear()
 
     def start_update(self):
         info = self.info
-        self.b_update.setEnabled(False)
-        self.head.setText(f"Downloading version {info['version']}…")
-        self.bar.show()
+        self._set_busy(True)
+        self._headline(f"Downloading version {info['version']}…", "new")
+        self.status.setText("Downloading…")
         self.bar.setRange(0, 0)
         tmp = tempfile.mkdtemp(prefix="dlpt_dl_")
 
@@ -1405,21 +1451,24 @@ class UpdateDialog(QDialog):
         if total:
             self.bar.setRange(0, 1000)
             self.bar.setValue(int(1000 * done / total))
+            self.bar.setTextVisible(True)
             self.bar.setFormat(f"{human_size(done)} of {human_size(total)}")
+            self.status.setText(f"Downloading {human_size(done)} of {human_size(total)}…")
 
     def _download_failed(self, msg):
-        self.bar.hide()
+        self._bar_idle()
+        self._set_busy(False)
         self.b_update.setEnabled(True)
-        self.head.setText("The update didn't download")
-        self.text.setText(msg)
+        self._headline("The update didn't download", "bad")
+        self.status.setText(msg)
 
     def _ready(self, prepared):
         cmd, _work = prepared
-        self.bar.hide()
-        self.head.setText(f"Version {self.info['version']} is ready to install")
-        self.text.setText("dl_pdf_tools will close, update itself and open again. This takes a few seconds.")
-        self.b_update.hide()
-        self.b_page.hide()
+        self._bar_idle(1000)
+        self._headline(f"Version {self.info['version']} is ready to install", "ok")
+        self.status.setText("dl_pdf_tools will close, update itself and open again. This takes a few seconds.")
+        for b in (self.b_update, self.b_again, self.b_page):
+            b.setEnabled(False)
         save_settings(self.settings)
         updater.start_helper(cmd)   # it waits for this app to close before replacing anything
         QTimer.singleShot(1200, self._quit)

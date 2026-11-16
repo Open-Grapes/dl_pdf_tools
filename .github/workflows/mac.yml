@@ -34,6 +34,8 @@ jobs:
 
       - name: Build, smoke-test and package
         run: python build_mac.py
+        env:
+          GH_TOKEN: ${{ github.token }}   # lets the "check for updates" test read this repo's releases
 
       - uses: actions/upload-artifact@v5
         with:

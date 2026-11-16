@@ -1,4 +1,4 @@
-"""Shared names, paths and settings for dl_pdf_tools."""
+﻿"""Shared names, paths and settings for dl_pdf_tools."""
 
 import json
 import os
@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "dl_pdf_tools"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 RELEASE_ASSET = f"{APP_NAME}-windows.zip"
 
 FROZEN = getattr(sys, "frozen", False)

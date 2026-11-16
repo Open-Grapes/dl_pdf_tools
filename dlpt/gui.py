@@ -5,23 +5,26 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.request
 from collections import OrderedDict
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap,
+from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QDesktopServices, QIcon, QImage, QKeySequence, QPainter,
+                           QPalette, QPixmap,
                            QTransform)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QFormLayout,
                                QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressDialog,
+                               QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog,
                                QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QStyle,
-                               QToolBar, QToolButton,
+                               QTextBrowser, QToolBar, QToolButton,
                                QVBoxLayout, QWidget)
 
-from . import engine, jobs
+from . import engine, jobs, updater
 from .common import APP_NAME, APP_VERSION, asset, human_size, load_settings, save_settings
 
 PT = 96 / 72          # screen pixels per PDF point at 100 %
@@ -1280,6 +1283,155 @@ class OrganizeView(QWidget):
         self.b_save.setEnabled(self.doc is not None)
 
 
+class _Worker(QThread):
+    """Runs fn(report) on a thread (network only, never MuPDF); report(done, total) for progress."""
+    progress = Signal(object, object)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self.fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(self.fn(lambda d, t: self.progress.emit(d, t)))
+        except Exception as e:
+            self.failed.emit(str(e) or e.__class__.__name__)
+
+
+class UpdateDialog(QDialog):
+    """Check for updates: up to date, or show what's new and update in place."""
+
+    def __init__(self, parent, settings, info=None):
+        super().__init__(parent)
+        self.setWindowTitle("Check for updates")
+        self.settings, self.info, self.worker = settings, info, None
+        lay = QVBoxLayout(self)
+        self.head = QLabel()
+        self.head.setStyleSheet("font-size: 15px; font-weight: 600;")
+        self.head.setWordWrap(True)
+        lay.addWidget(self.head)
+        self.text = QLabel()
+        self.text.setWordWrap(True)
+        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.text.setOpenExternalLinks(True)
+        lay.addWidget(self.text)
+        self.notes = QTextBrowser()
+        self.notes.setOpenExternalLinks(True)
+        self.notes.setMinimumHeight(220)
+        self.notes.hide()
+        lay.addWidget(self.notes, 1)
+        self.bar = QProgressBar()
+        self.bar.hide()
+        lay.addWidget(self.bar)
+        self.auto = QCheckBox("Check for updates automatically (once a day)")
+        self.auto.setChecked(settings.get("auto_update", True))
+        self.auto.toggled.connect(lambda on: self.settings.__setitem__("auto_update", on))
+        lay.addWidget(self.auto)
+        self.buttons = QDialogButtonBox()
+        self.b_update = self.buttons.addButton("Update now", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.b_page = self.buttons.addButton("View on GitHub", QDialogButtonBox.ButtonRole.ActionRole)
+        self.b_close = self.buttons.addButton(QDialogButtonBox.StandardButton.Close)
+        self.b_update.clicked.connect(self.start_update)
+        self.b_page.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(
+            (self.info or {}).get("page") or updater.RELEASES_PAGE)))
+        self.b_close.clicked.connect(self.reject)
+        lay.addWidget(self.buttons)
+        self.setMinimumWidth(520)
+        if info:
+            self._show(info)
+        else:
+            self.check()
+
+    def check(self):
+        self.head.setText("Checking for updates…")
+        self.text.setText(f"You have version {APP_VERSION}.")
+        self.b_update.hide()
+        self.b_page.hide()
+        self.worker = _Worker(lambda _r: updater.latest(), self)
+        self.worker.done.connect(self._show)
+        self.worker.failed.connect(self._failed)
+        self.worker.start()
+
+    def _show(self, info):
+        self.info = info
+        self.settings["last_update_check"] = time.time()
+        if not updater.is_newer(info["version"]):
+            self.head.setText("✅ dl_pdf_tools is up to date")
+            self.text.setText(f"You have the latest version, {APP_VERSION}.")
+            self.b_update.hide()
+            self.b_page.hide()
+            self.adjustSize()
+            return
+        self.head.setText(f"⬆ Version {info['version']} is available")
+        self.text.setText(f"You have version {APP_VERSION}. What's new:")
+        self.notes.setMarkdown(info["notes"] or "_No release notes._")
+        self.notes.show()
+        ok, why = updater.can_install()
+        if not info.get("asset"):
+            ok, why = False, f"The new version has no download for this computer ({updater.asset_name()})."
+        self.b_page.show()
+        self.b_update.setVisible(ok)
+        if not ok:
+            self.text.setText(self.text.text() + f"<br><i>{why}</i>")
+        self.resize(max(self.width(), 600), 520)
+
+    def _failed(self, msg):
+        self.head.setText("Couldn't check for updates")
+        self.text.setText(msg)
+        self.b_page.show()
+        self.b_update.hide()
+
+    def start_update(self):
+        info = self.info
+        self.b_update.setEnabled(False)
+        self.head.setText(f"Downloading version {info['version']}…")
+        self.bar.show()
+        self.bar.setRange(0, 0)
+        tmp = tempfile.mkdtemp(prefix="dlpt_dl_")
+
+        def work(report):
+            pkg = updater.download(info, tmp, report)
+            return updater.prepare_install(pkg, os.getpid())
+
+        self.worker = _Worker(work, self)
+        self.worker.progress.connect(self._progress)
+        self.worker.done.connect(self._ready)
+        self.worker.failed.connect(self._download_failed)
+        self.worker.start()
+
+    def _progress(self, done, total):
+        if total:
+            self.bar.setRange(0, 1000)
+            self.bar.setValue(int(1000 * done / total))
+            self.bar.setFormat(f"{human_size(done)} of {human_size(total)}")
+
+    def _download_failed(self, msg):
+        self.bar.hide()
+        self.b_update.setEnabled(True)
+        self.head.setText("The update didn't download")
+        self.text.setText(msg)
+
+    def _ready(self, prepared):
+        cmd, _work = prepared
+        self.bar.hide()
+        self.head.setText(f"Version {self.info['version']} is ready to install")
+        self.text.setText("dl_pdf_tools will close, update itself and open again. This takes a few seconds.")
+        self.b_update.hide()
+        self.b_page.hide()
+        save_settings(self.settings)
+        updater.start_helper(cmd)   # it waits for this app to close before replacing anything
+        QTimer.singleShot(1200, self._quit)
+
+    def _quit(self):
+        self.accept()
+        win = self.parent()
+        if win is not None and not win.close():
+            # The user chose to stay (e.g. unsaved Organize changes); the update installs when the app closes.
+            QMessageBox.information(win, "Update", "The update will be installed when you close dl_pdf_tools.")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1332,6 +1484,15 @@ class MainWindow(QMainWindow):
         self.wifi_label.clicked.connect(lambda: (self.wifi_dialog().show(), self.wifi_dialog().raise_()))
         self.wifi_label.hide()
         self.status.addPermanentWidget(self.wifi_label)
+        self.update_label = QPushButton()
+        self.update_label.setFlat(True)
+        self.update_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_label.setStyleSheet("font-weight: 600;")
+        self.update_label.clicked.connect(lambda: self.check_updates(self._update_info))
+        self.update_label.hide()
+        self.status.addPermanentWidget(self.update_label)
+        self._update_info = None
+        QTimer.singleShot(3000, self._auto_update_check)
         self.status.addPermanentWidget(self.info)
 
         g = self.settings.get("geometry")
@@ -1460,6 +1621,9 @@ class MainWindow(QMainWindow):
         tb.addAction(self.a_folder)
         self.a_about = self._act("", self.about, "F1", SP.SP_MessageBoxInformation, "About")
         tb.addAction(self.a_about)
+        self.a_update = self._act("Check for updates", self.check_updates, None, SP.SP_BrowserReload,
+                                  "See if a newer version of dl_pdf_tools is available")
+        tb.addAction(self.a_update)
 
     def _set_enabled(self, on):
         for a in (self.a_split, self.a_extract, self.a_compress, self.a_folder, self.a_organize):
@@ -1671,6 +1835,29 @@ class MainWindow(QMainWindow):
             self.save_organized()
             return False   # saving runs in the background; the user can open/close again afterwards
         return r == QMessageBox.StandardButton.Discard
+
+    # ---------------------------------------------------------------- updates
+    def check_updates(self, info=None):
+        d = UpdateDialog(self, self.settings, info if isinstance(info, dict) else None)
+        d.exec()
+        save_settings(self.settings)
+
+    def _auto_update_check(self):
+        """Quietly check once a day; if there's a newer version, show it in the status bar."""
+        if not self.settings.get("auto_update", True) or not updater.app_location():
+            return
+        if time.time() - float(self.settings.get("last_update_check", 0)) < 24 * 3600:
+            return
+        self._auto_worker = _Worker(lambda _r: updater.latest(), self)
+
+        def done(info):
+            self.settings["last_update_check"] = time.time()
+            if updater.is_newer(info["version"]):
+                self._update_info = info
+                self.update_label.setText(f"⬆ Update available: {info['version']}")
+                self.update_label.show()
+        self._auto_worker.done.connect(done)
+        self._auto_worker.start()
 
     # ---------------------------------------------------------------- theme
     def set_theme(self, key):

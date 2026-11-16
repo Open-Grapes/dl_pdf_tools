@@ -61,7 +61,7 @@ def pyinstaller():
            "--name", APP_NAME, "--icon", ICNS, "--osx-bundle-identifier", BUNDLE_ID,
            "--add-data", f"{ROOT / 'assets' / 'icon.png'}:assets",
            "--add-data", f"{ROOT / 'dlpt' / 'web_page.html'}:dlpt",
-           "--collect-submodules", "zeroconf", "--collect-submodules", "qrcode",
+           "--collect-submodules", "zeroconf", "--collect-submodules", "qrcode", "--collect-data", "certifi",
            "--distpath", WORK / "dist", "--workpath", WORK / "work", "--specpath", WORK]
     for m in EXCLUDE:
         cmd += ["--exclude-module", m]
@@ -228,7 +228,37 @@ def smoke_test():
         if p.poll() is None:
             p.terminate()
             p.wait(timeout=20)
+    # Check for updates reaches GitHub from inside the app (certificates, network). The workflow passes the
+    # build's own GitHub token, which can read this repo's releases while the repo is private.
+    out = t / "update.json"
+    subprocess.run([str(binary), "--check-update", str(out)], timeout=120)
+    res = json.loads(out.read_text())
+    print("Check for updates:", res, flush=True)
+    assert "error" not in res and res.get("version"), f"update check failed: {res}"
     print("\nSMOKE TEST PASSED", flush=True)
+
+
+def update_install_test(dmg):
+    """Run the real updater against the new .dmg: replace a copy of the app while a process 'is' the app."""
+    from dlpt import updater
+    t = WORK / "update-test"
+    shutil.rmtree(t, ignore_errors=True)
+    t.mkdir(parents=True)
+    old = t / f"{APP_NAME}.app"
+    sh("ditto", APP, old)
+    (old / "Contents" / "Resources" / "OLD_MARKER").write_text("old copy")
+    dummy = subprocess.Popen(["sleep", "3"])
+    cmd, work = updater.prepare_install(dmg, dummy.pid, launch=False, loc=old)
+    updater.start_helper(cmd)
+    for _ in range(120):
+        if (work / "finished.txt").exists():
+            break
+        time.sleep(0.5)
+    assert (work / "finished.txt").exists(), "the update helper didn't finish"
+    assert not (old / "Contents" / "Resources" / "OLD_MARKER").exists(), "the app wasn't replaced"
+    assert (old / "Contents" / "MacOS" / APP_NAME).exists(), "the replaced app has no program"
+    sh("codesign", "--verify", "--deep", "--strict", old)
+    print("UPDATE INSTALL TEST PASSED", flush=True)
 
 
 if __name__ == "__main__":
@@ -238,4 +268,4 @@ if __name__ == "__main__":
     pyinstaller()
     fill_bundle()
     smoke_test()
-    make_dmg()
+    update_install_test(make_dmg())

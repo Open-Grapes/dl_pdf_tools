@@ -38,6 +38,21 @@ your last Reduce size choice and whether Extract combines pages or saves them se
 Size estimates are exact for small PDFs (up to 8 pages). For bigger ones the tool compresses a sample of pages and
 scales the result up, which is usually within a few percent.
 
+## Updates
+
+Click **Check for updates** (top right). The app asks GitHub for the newest release:
+
+- If you already have it, it says *dl_pdf_tools is up to date*.
+- If there's a newer one, it shows what's new. **Update now** downloads it, closes the app, swaps in the new
+  version and opens it again. Your settings are kept.
+
+It also checks quietly once a day and shows *Update available* in the status bar. You can switch this off in the
+Check for updates window.
+
+Updates come from this repository's [Releases](../../releases), so other people only get them while the repository
+is **public**. While it's private, the check only works on a computer that is logged in to GitHub with access to
+it (through the `gh` tool or a `GH_TOKEN` variable); everyone else sees "No published version was found".
+
 ## Web version (in your browser)
 
 Double-click **`dl_pdf_tools (Web).cmd`** in the app folder (on a Mac: **`dl_pdf_tools (Web).command`** in the
@@ -73,6 +88,14 @@ py -3.13 -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python run.py [file.pdf]
 ```
+
+## Publishing a new version
+
+1. Raise `APP_VERSION` in `dlpt/common.py` (e.g. `1.4.0` → `1.5.0`).
+2. Build Windows with `build.py`; push to `main` so GitHub Actions builds the two Mac `.dmg` files.
+3. Create a GitHub release tagged `v1.5.0` with `dl_pdf_tools-windows.zip`,
+   `dl_pdf_tools-mac-apple-silicon.dmg` and `dl_pdf_tools-mac-intel.dmg` attached (keep these exact names: the
+   updater looks for them). The release notes are what users see under "What's new".
 
 ## Build the .exe
 

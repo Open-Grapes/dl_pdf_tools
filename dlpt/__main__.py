@@ -4,6 +4,7 @@
   dl_pdf_tools.exe --web [--no-browser]     local web version: opens the tools in your browser
   dl_pdf_tools.exe --wifi [PARENT_PID]      Share via Wi-Fi server for phones (started by the window)
   dl_pdf_tools.exe --selftest FILE.pdf DIR  run every operation (in worker processes) and write DIR\\selftest.txt
+  dl_pdf_tools.exe --check-update FILE      ask GitHub for the latest version, write the answer to FILE (JSON)
 """
 
 import sys
@@ -45,8 +46,24 @@ def selftest(src, out_dir):
     return 0 if log[-1] == "OK" else 1
 
 
+def check_update(out_file):
+    """`--check-update FILE`: ask GitHub for the latest version and write the answer as JSON (build tests)."""
+    import json
+    from . import updater
+    try:
+        info = updater.latest()
+        res = {"version": info["version"], "newer": updater.is_newer(info["version"]),
+               "asset": (info["asset"] or {}).get("name"), "used_login": bool(info["token"])}
+    except Exception as e:
+        res = {"error": str(e)}
+    Path(out_file).write_text(json.dumps(res), encoding="utf-8")
+    return 0 if "error" not in res else 1
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["--check-update"] and len(args) >= 2:
+        return check_update(args[1])
     if args[:1] == ["--selftest"] and len(args) >= 3:
         return selftest(args[1], args[2])
     if args[:1] == ["--wifi"]:   # started by the window's "Share via Wi-Fi" switch: --wifi [PARENT_PID]

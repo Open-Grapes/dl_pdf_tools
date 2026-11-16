@@ -95,6 +95,16 @@ def test_ops():
         files = engine.extract_each(src, [0, 1], tmp / "each_small", compress=bal)
         assert [pages_text(p) for p in files] == [["Page 1"], ["Page 2"]]
 
+        # Organize: reorder, rotate and drop pages into a new file.
+        out = engine.save_arranged(src, [(3, 0), (0, 90), (1, 0), (2, 0), (5, 270)], tmp / "arranged.pdf")
+        assert pages_text(out) == ["Page 4", "Page 1", "Page 2", "Page 3", "Page 6"], pages_text(out)
+        with pymupdf.open(str(out)) as d:
+            assert [p.rotation for p in d] == [0, 90, 0, 0, 270]
+        e = engine.estimate(src, bal, pages=[(0, 90), (2, 0)])
+        assert e["exact"] and e["size"] > 0
+        parts = engine.split_groups(src, [[(1, 180)], [(4, 0), (3, 0)]], tmp / "split")
+        assert [pages_text(p) for p in parts] == [["Page 2"], ["Page 5", "Page 4"]]
+
         # A tiny text-only PDF can't shrink: nothing should be written.
         small = tmp / "small.pdf"
         d = pymupdf.open()

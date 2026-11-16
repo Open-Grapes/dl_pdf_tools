@@ -1,14 +1,22 @@
 # dl_pdf_tools
 
-A small Windows PDF tool. **View** PDFs, **split** them, **extract pages** and **reduce file size**.
-No editing; your original files are never changed. Every tool writes a new file.
+A small PDF tool for Windows and macOS. **View** PDFs, **organize** pages, **split** them, **extract pages** and
+**reduce file size**. Your original files are never changed: every tool writes a new file.
+
+**Download:** see [Releases](../../releases). On Windows, get `dl_pdf_tools-windows.zip`, unzip it and run
+`dl_pdf_tools.exe`. On a Mac, get the `.dmg` for your Mac (*apple-silicon* for M1 and newer, *intel* for older
+Macs) and follow `READ ME.txt` inside it.
 
 ## Using it
 
 - **Open:** use `Ctrl+O`, drag a PDF onto the window, or right-click a PDF → *Open with* → `dl_pdf_tools.exe`.
+- **Organize (Ctrl+G):** every page as a grid. Drag pages to reorder them; select pages and rotate (L / R), move
+  (Ctrl+← / Ctrl+→), delete (Del) or extract them; Undo (Ctrl+Z) and Reset. **Save as new PDF** writes the result.
+  Split, Extract and Reduce size use your organized pages while Organize is open.
 - **Pages panel (F4):** thumbnails. Click one to jump to that page. Use Ctrl/Shift + click to select several pages, then right-click → *Extract selected pages* or *Split after page N*.
 - **Split (Ctrl+Shift+S):** every N pages, one file per page, or custom ranges (`1-3, 4-10, 11-`; each range becomes one file).
-- **Extract pages (Ctrl+E):** pick pages such as `1-3, 5, 8-` and save them into one new PDF, or one PDF per page.
+- **Extract pages (Ctrl+E):** pick pages such as `1-3, 5, 8-`. When you've selected several pages, it asks whether
+  to **combine them into one PDF** or **save each page as its own PDF**.
   Tick **Also reduce file size** to choose a Reduce size setting for the extracted pages, with a size estimate.
 - **Reduce size (Ctrl+R):** every choice shows its **estimated file size** before you compress.
   - **Light:** images capped at 220 dpi, JPEG quality 85. You won't notice a difference.
@@ -20,13 +28,20 @@ No editing; your original files are never changed. Every tool writes a new file.
   Text and vector graphics stay sharp. The tool also trims embedded fonts and removes unused data.
   If the PDF can't be made smaller, it tells you and writes no file.
 - **Zoom:** Ctrl + mouse wheel, `Ctrl +` / `Ctrl −`, `Ctrl+0` fit width, `Ctrl+9` fit page.
+- **Theme:** the Theme menu (top right) switches between *Match system*, *Light* and *Dark*.
+
+On a Mac, use ⌘ where this says Ctrl.
+
+The app remembers your settings between sessions: theme, window size and position, the Pages panel, zoom,
+your last Reduce size choice and whether Extract combines pages or saves them separately.
 
 Size estimates are exact for small PDFs (up to 8 pages). For bigger ones the tool compresses a sample of pages and
 scales the result up, which is usually within a few percent.
 
 ## Web version (in your browser)
 
-Double-click **`dl_pdf_tools (Web).cmd`** in the app folder, or run `dl_pdf_tools.exe --web`. Your browser opens a
+Double-click **`dl_pdf_tools (Web).cmd`** in the app folder (on a Mac: **`dl_pdf_tools (Web).command`** in the
+.dmg; right-click → Open the first time), or run `dl_pdf_tools.exe --web`. Your browser opens a
 page with the same viewer and tools. Results arrive as downloads; several files come as one .zip.
 
 It all runs on your own computer. The page talks to a small server that only this PC can reach (127.0.0.1),
@@ -49,6 +64,7 @@ the app. There's no password, so anyone on the same Wi-Fi who knows the address 
 
 **Phone can't connect?** The first time, Windows asks whether to allow dl_pdf_tools on networks: allow it on
 *Private networks*. Your Wi-Fi must also be set to *Private* in Windows Settings → Network & internet.
+On a Mac, allow dl_pdf_tools to find devices on your local network when macOS asks.
 
 ## Run from source
 
@@ -65,6 +81,15 @@ py -3.13 -m venv .venv
 ```
 
 Output: `dist\Windows\dl_pdf_tools\dl_pdf_tools.exe`, plus a zip of that folder for sharing.
+
+## Build for macOS
+
+GitHub Actions builds the Mac app on every push to `main` (`.github/workflows/mac.yml`): one `.dmg` for Apple
+Silicon and one for Intel, each smoke-tested on a real Mac. Download them from the workflow run's *Artifacts*.
+On a Mac you can also run `python3 build_mac.py` (output in `dist/MacOS/`).
+
+The Mac app is signed ad hoc but not notarized by Apple, so the first launch needs *Open Anyway* in
+System Settings → Privacy & Security.
 
 ## Licences
 

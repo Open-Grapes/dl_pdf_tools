@@ -10,13 +10,15 @@ from collections import OrderedDict
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import QObject, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap
+from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QIcon, QImage, QKeySequence, QPainter, QPalette, QPixmap,
+                           QTransform)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDockWidget, QFileDialog, QFormLayout,
                                QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressDialog,
-                               QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStyle, QToolBar,
+                               QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QStyle,
+                               QToolBar, QToolButton,
                                QVBoxLayout, QWidget)
 
 from . import engine, jobs
@@ -37,6 +39,9 @@ def render(page, scale, dpr=1.0):
 
 def show_in_folder(path):
     path = Path(path)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)] if path.is_dir() else ["open", "-R", str(path)])
+        return
     if path.is_dir():
         os.startfile(str(path))
     else:
@@ -393,7 +398,7 @@ class PathRow(QWidget):
 def _note(text):
     lab = QLabel(text)
     lab.setWordWrap(True)
-    lab.setStyleSheet("color: palette(placeholder-text);")
+    lab.setForegroundRole(QPalette.ColorRole.PlaceholderText)
     return lab
 
 
@@ -477,24 +482,44 @@ class SplitDialog(QDialog):
 
 
 class ExtractDialog(QDialog):
-    def __init__(self, parent, src, page_count, pages, password=None, saved=None):
+    """Extract pages. `entries` is the current page arrangement (plain page numbers, or Organize's
+    (page, rotation) list); the page box and `positions` refer to positions in it, 0-based."""
+
+    def __init__(self, parent, src, entries, positions, password=None, saved=None):
         super().__init__(parent)
         self.setWindowTitle("Extract pages")
-        self.src, self.count, self.password = Path(src), page_count, password
+        self.src, self.entries, self.password = Path(src), list(entries), password
+        self.count = len(self.entries)
         self.saved, self.cvalues = saved or {}, None
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel(f"<b>{self.src.name}</b> — {page_count} pages"))
+        lay.addWidget(QLabel(f"<b>{self.src.name}</b> — {self.count} pages"))
+
+        n = len(positions)
+        if n > 1:
+            q = QLabel(f"You selected <b>{n} pages</b>. Do you want them combined into one PDF, "
+                       "or each page saved as its own PDF?")
+            q.setWordWrap(True)
+            q.setStyleSheet("font-size: 14px; padding: 4px 0 6px 0;")
+            lay.addWidget(q)
 
         form = QFormLayout()
-        self.pages = QLineEdit(engine.format_ranges(pages))
+        self.pages = QLineEdit(engine.format_ranges(positions))
         self.pages.setPlaceholderText("e.g. 1-3, 5, 8-")
         form.addRow("Pages:", self.pages)
         lay.addLayout(form)
-        lay.addWidget(_note("Tip: select pages in the thumbnail list (Ctrl / Shift + click) before opening this."))
+        lay.addWidget(_note("Tip: select pages in the Pages panel or in Organize (Ctrl / Shift + click) "
+                            "before opening this."))
 
-        self.r_one = QRadioButton("Into one new PDF")
-        self.r_each = QRadioButton("Each page as a separate PDF")
-        self.r_one.setChecked(True)
+        self.r_one = QRadioButton("Combine into one PDF")
+        self.r_each = QRadioButton("Save each page as its own PDF")
+        f = self.r_one.font()
+        f.setBold(True)
+        self.r_one.setFont(f)
+        self.r_each.setFont(f)
+        grp = QButtonGroup(self)
+        grp.addButton(self.r_one)
+        grp.addButton(self.r_each)
+        (self.r_each if self.saved.get("extract_each") else self.r_one).setChecked(True)
         lay.addWidget(self.r_one)
         self.save = PathRow("", "save")
         lay.addWidget(self.save)
@@ -506,7 +531,7 @@ class ExtractDialog(QDialog):
         self.shrink = QCheckBox("Also reduce file size")
         self.shrink_btn = QPushButton("Options…")
         self.shrink_info = QLabel()
-        self.shrink_info.setStyleSheet("color: palette(placeholder-text);")
+        self.shrink_info.setForegroundRole(QPalette.ColorRole.PlaceholderText)
         srow.addWidget(self.shrink)
         srow.addWidget(self.shrink_btn)
         srow.addWidget(self.shrink_info, 1)
@@ -529,8 +554,12 @@ class ExtractDialog(QDialog):
         self.save.edit.textEdited.connect(lambda _: setattr(self, "_name_edited", True))
         self.pages.textChanged.connect(self._update)
         self.r_one.toggled.connect(self._update)
-        self.resize(540, self.sizeHint().height())
+        self.resize(560, self.sizeHint().height())
         self._update()
+
+    def _chosen(self):
+        """Entries for the pages typed in the box (raises RangeError)."""
+        return [self.entries[i] for i in engine.parse_pages(self.pages.text(), self.count)]
 
     def _shrink_toggled(self, on):
         self.shrink_btn.setEnabled(on)
@@ -544,14 +573,15 @@ class ExtractDialog(QDialog):
     def _shrink_options(self):
         """Open the Reduce size choices for the pages being extracted. Returns True if confirmed."""
         try:
-            pages = engine.parse_pages(self.pages.text(), self.count)
+            pages = self._chosen()
         except engine.RangeError as e:
             QMessageBox.warning(self, "Extract pages", str(e))
             return False
-        d = CompressOptionsDialog(self, self.src, self.password, pages, self.saved)
+        d = CompressOptionsDialog(self, self.src, self.password, pages, self.saved.get("compress"))
         if d.exec() != QDialog.DialogCode.Accepted:
             return False
-        self.cvalues, self.saved = d.opts.options(), d.opts.remember()
+        self.cvalues = d.opts.options()
+        self.saved["compress"] = d.opts.remember()
         self.shrink_info.setText(d.opts.describe())
         self._info_pages = self.pages.text()
         return True
@@ -563,25 +593,26 @@ class ExtractDialog(QDialog):
         if self.cvalues is not None and self.pages.text() != getattr(self, "_info_pages", None):
             self.shrink_info.setText(self.shrink_info.text().split(" · ")[0])   # estimate was for other pages
         try:
-            pages = engine.parse_pages(self.pages.text(), self.count)
+            positions = engine.parse_pages(self.pages.text(), self.count)
         except engine.RangeError as e:
             self.preview.setText(f"<span style='color:#d33'>{e}</span>")
             self.ok.setEnabled(False)
             return
         self.ok.setEnabled(True)
-        n = len(pages)
+        n = len(positions)
         self.preview.setText(f"→ {n} page{'s' if n != 1 else ''}" +
-                             ("" if one else f" in {n} file{'s' if n != 1 else ''}"))
+                             (" in one PDF" if one else f" in {n} file{'s' if n != 1 else ''}"))
         if not self._name_edited:
-            label = engine.format_ranges(pages).replace(", ", "_").replace(" ", "")
+            label = engine.format_ranges(positions).replace(", ", "_").replace(" ", "")
             if len(label) > 40:
                 label = label[:40] + "_etc"
             self.save.edit.setText(str(self.src.parent / f"{self.src.stem}_pages_{label}.pdf"))
 
     def _accept(self):
         try:
-            self.result_pages = engine.parse_pages(self.pages.text(), self.count)
+            self.result_pages = self._chosen()
             self.result_one = self.r_one.isChecked()
+            self.saved["extract_each"] = not self.result_one
             self.result_compress = self.cvalues if self.shrink.isChecked() else None
             if self.result_one:
                 p = self.save.path()
@@ -788,13 +819,15 @@ class CompressOptions(QWidget):
 
 
 class CompressDialog(QDialog):
-    def __init__(self, parent, src, password, settings):
+    def __init__(self, parent, src, password, settings, pages=None):
         super().__init__(parent)
         self.setWindowTitle("Reduce file size")
         self.src = Path(src)
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(f"<b>{self.src.name}</b> — currently {human_size(self.src.stat().st_size)}"))
-        self.opts = CompressOptions(src, password, None, settings.get("compress"))
+        if pages is not None:
+            lay.addWidget(_note("Includes your Organize changes (page order, rotation and deletions)."))
+        self.opts = CompressOptions(src, password, pages, settings.get("compress"))
         lay.addWidget(self.opts)
 
         form = QFormLayout()
@@ -942,6 +975,311 @@ class WifiDialog(QDialog):
 
 # ======================================================================== main window
 
+class OrganizeView(QWidget):
+    """Overview of every page as a grid: drag to reorder, rotate, delete, extract, then save as a new PDF.
+
+    Changes only live here until "Save as new PDF"; the original file is never touched.
+    """
+    changed = Signal()
+    extractRequested = Signal(list)   # selected positions (0-based) in the current arrangement
+    splitRequested = Signal(str)      # ranges text, e.g. "1-3, 4-8"
+    saveRequested = Signal()
+
+    TILE = 150
+    ROLE = Qt.ItemDataRole.UserRole
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.doc, self.sizes, self.base = None, [], {}
+        self.history, self.saved = [], []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 6)
+
+        bar = QHBoxLayout()
+
+        def btn(text, slot, tip=None):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            if tip:
+                b.setToolTip(tip)
+            bar.addWidget(b)
+            return b
+
+        self.b_left = btn("⟲ Rotate left", lambda: self.rotate(-90), "Rotate the selected pages left (L)")
+        self.b_right = btn("⟳ Rotate right", lambda: self.rotate(90), "Rotate the selected pages right (R)")
+        self.b_back = btn("◀ Move", lambda: self.move(-1), "Move the selected pages earlier (Ctrl+←)")
+        self.b_fwd = btn("Move ▶", lambda: self.move(1), "Move the selected pages later (Ctrl+→)")
+        self.b_delete = btn("🗑 Delete", self.delete_selected, "Delete the selected pages (Del)")
+        self.b_extract = btn("Extract selected…", lambda: self.extractRequested.emit(self.selected_positions()),
+                             "Save the selected pages as new PDF(s)")
+        bar.addSpacing(10)
+        self.b_undo = btn("Undo", self.undo, "Undo the last change (Ctrl+Z)")
+        self.b_reset = btn("Reset", self.reset, "Undo all changes")
+        bar.addStretch(1)
+        self.info = QLabel()
+        bar.addWidget(self.info)
+        self.b_save = btn("Save as new PDF…", self.saveRequested.emit, "Write the pages as they are here to a new PDF")
+        self.b_save.setStyleSheet("font-weight: 600;")
+        lay.addLayout(bar)
+        lay.addWidget(_note("Drag pages to change their order. Click to select; Ctrl+click or Shift+click to select "
+                            "several. Right-click for more. Your original file isn't changed: "
+                            "<b>Save as new PDF</b> writes a copy."))
+
+        self.grid = QListWidget()
+        self.grid.setViewMode(QListWidget.ViewMode.ListMode)   # ListMode + wrapping = a grid that reorders
+        self.grid.setFlow(QListWidget.Flow.LeftToRight)
+        self.grid.setWrapping(True)
+        self.grid.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.grid.setUniformItemSizes(True)
+        self.grid.setSpacing(12)
+        self.grid.setIconSize(QSize(self.TILE, int(self.TILE * 1.42) + 24))
+        self.grid.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.grid.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.grid.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.grid.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.grid.customContextMenuRequested.connect(self._menu)
+        self.grid.itemSelectionChanged.connect(self._update_info)
+        self.grid.model().rowsMoved.connect(lambda *_: self._after_drag())
+        lay.addWidget(self.grid, 1)
+
+        for keys, slot in (("Del", self.delete_selected), ("Ctrl+Z", self.undo), ("L", lambda: self.rotate(-90)),
+                           ("R", lambda: self.rotate(90)), ("Ctrl+Left", lambda: self.move(-1)),
+                           ("Ctrl+Right", lambda: self.move(1))):
+            a = QAction(self)
+            a.setShortcut(QKeySequence(keys))
+            a.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            a.triggered.connect(slot)
+            self.addAction(a)
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._render_some)
+        self._drag_snapshot = None
+        self.grid.viewport().installEventFilter(self)
+
+    # ---------------------------------------------------------------- state
+    def set_doc(self, doc):
+        self.timer.stop()
+        self.doc, self.base = doc, {}
+        self.sizes = [(p.rect.width, p.rect.height) for p in doc] if doc else []
+        self.saved = [(i, 0) for i in range(len(self.sizes))]
+        self.history = []
+        self._fill(self.saved)
+        if doc and self.isVisible():
+            self.timer.start(0)
+
+    def entries(self):
+        return [tuple(self.grid.item(i).data(self.ROLE)) for i in range(self.grid.count())]
+
+    def is_dirty(self):
+        return self.doc is not None and self.entries() != self.saved
+
+    def mark_saved(self):
+        self.saved = self.entries()
+        self._update_info()
+
+    def selected_positions(self):
+        return sorted(self.grid.row(it) for it in self.grid.selectedItems())
+
+    def _fill(self, entries, select=()):
+        self.grid.clear()
+        for e in entries:
+            it = QListWidgetItem()
+            it.setData(self.ROLE, list(e))
+            it.setSizeHint(QSize(self.TILE + 16, int(self.TILE * 1.42) + 34))
+            self.grid.addItem(it)
+        for r in select:
+            if 0 <= r < self.grid.count():
+                self.grid.item(r).setSelected(True)
+        self._refresh()
+
+    def _push(self):
+        self.history.append(self.entries())
+        del self.history[:-100]
+
+    def _changed(self):
+        self._refresh()
+        self.changed.emit()
+
+    # ---------------------------------------------------------------- actions
+    def rotate(self, delta):
+        items = self.grid.selectedItems()
+        if not items:
+            return
+        self._push()
+        for it in items:
+            p, rot = it.data(self.ROLE)
+            it.setData(self.ROLE, [p, (rot + delta) % 360])
+        self._changed()
+
+    def delete_selected(self):
+        rows = self.selected_positions()
+        if not rows:
+            return
+        if len(rows) == self.grid.count():
+            QMessageBox.information(self, "Organize", "A PDF needs at least one page, so you can't delete them all.")
+            return
+        self._push()
+        for r in reversed(rows):
+            self.grid.takeItem(r)
+        self._changed()
+
+    def move(self, direction):
+        rows = self.selected_positions()
+        if not rows:
+            return
+        ents = self.entries()
+        if (direction < 0 and rows[0] == 0) or (direction > 0 and rows[-1] == len(ents) - 1):
+            return
+        self._push()
+        chosen = set(rows)
+        moving = [ents[r] for r in rows]                     # selected pages move together as one block
+        rest = [e for i, e in enumerate(ents) if i not in chosen]
+        if direction < 0:
+            at = rows[0] - 1                                  # one place before the first selected page
+        else:
+            at = rows[-1] + 1 - len(rows) + 1                 # one place after the last selected page
+        new = rest[:at] + moving + rest[at:]
+        self._fill(new, range(at, at + len(moving)))
+        self.changed.emit()
+
+    def undo(self):
+        if self.history:
+            self._fill(self.history.pop())
+            self.changed.emit()
+
+    def reset(self):
+        if self.is_dirty():
+            self._push()
+            self._fill(self.saved)
+            self.changed.emit()
+
+    # Drag and drop: remember the order before the drag so it can be undone.
+    def eventFilter(self, obj, e):
+        if e.type() == e.Type.MouseButtonPress:
+            self._drag_snapshot = self.entries()
+        return False
+
+    def _after_drag(self):
+        if self._drag_snapshot is not None and self._drag_snapshot != self.entries():
+            self.history.append(self._drag_snapshot)
+        self._drag_snapshot = None
+        QTimer.singleShot(0, self._changed)
+
+    def _menu(self, pos):
+        it = self.grid.itemAt(pos)
+        if it is not None and not it.isSelected():
+            self.grid.clearSelection()
+            it.setSelected(True)
+        n = len(self.grid.selectedItems())
+        m = QMenu(self)
+        if n:
+            m.addAction("Rotate left", lambda: self.rotate(-90))
+            m.addAction("Rotate right", lambda: self.rotate(90))
+            m.addAction(f"Delete {n} page{'s' if n > 1 else ''}", self.delete_selected)
+            m.addSeparator()
+            m.addAction(f"Extract {n} page{'s' if n > 1 else ''}…",
+                        lambda: self.extractRequested.emit(self.selected_positions()))
+        if it is not None:
+            row, count = self.grid.row(it), self.grid.count()
+            if row < count - 1:
+                m.addAction(f"Split after this page ({row + 1})…",
+                            lambda: self.splitRequested.emit(f"1-{row + 1}, {row + 2}-{count}"))
+        m.addSeparator()
+        m.addAction("Select all", self.grid.selectAll)
+        m.exec(self.grid.viewport().mapToGlobal(pos))
+
+    # ---------------------------------------------------------------- drawing
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() in (e.Type.PaletteChange, e.Type.StyleChange) and self.doc:
+            QTimer.singleShot(0, self._refresh)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self.doc and len(self.base) < len(self.sizes):
+            self.timer.start(0)
+
+    def _render_some(self):
+        if not self.doc:
+            self.timer.stop()
+            return
+        top = self.grid.indexAt(self.grid.viewport().rect().topLeft() + QPoint(20, 20)).row()
+        wanted = [self.grid.item(r).data(self.ROLE)[0] for r in range(max(0, top), min(self.grid.count(), top + 24))]
+        todo = [p for p in wanted if p not in self.base][:3]
+        if not todo:
+            todo = [p for p in range(len(self.sizes)) if p not in self.base][:3]
+        if not todo:
+            self.timer.stop()
+            return
+        dpr = self.devicePixelRatioF()
+        long_side = int(self.TILE * 1.42)
+        for p in todo:
+            w, h = self.sizes[p]
+            try:
+                self.base[p] = render(self.doc[p], long_side / max(w, h), dpr)
+            except Exception:
+                self.base[p] = QImage()
+        for r in range(self.grid.count()):
+            if self.grid.item(r).data(self.ROLE)[0] in todo:
+                self._paint_item(r)
+
+    def _refresh(self):
+        for r in range(self.grid.count()):
+            self._paint_item(r)
+        self._update_info()
+
+    def _paint_item(self, row):
+        it = self.grid.item(row)
+        p, rot = it.data(self.ROLE)
+        dpr = self.devicePixelRatioF()
+        W, H, CAP = self.TILE, int(self.TILE * 1.42), 24
+        pm = QPixmap(int(W * dpr), int((H + CAP) * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        w, h = self.sizes[p]
+        if rot in (90, 270):
+            w, h = h, w
+        s = min(W / w, H / h)
+        tw, th = w * s, h * s
+        target = QRectF((W - tw) / 2, (H - th) / 2, tw, th)
+        base = self.base.get(p)
+        painter.fillRect(target, Qt.GlobalColor.white)
+        if base is not None and not base.isNull():
+            img = base.transformed(QTransform().rotate(rot)) if rot else base
+            painter.drawImage(target, img)
+        painter.setPen(QColor(150, 150, 150))
+        painter.drawRect(target)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        cap = f"{row + 1}"
+        if p != row:
+            cap += f"   (p. {p + 1})"
+        if rot:
+            cap += "  ↻"
+        painter.drawText(QRectF(0, H + 4, W, CAP - 4), int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
+                         cap)
+        painter.end()
+        it.setIcon(QIcon(pm))
+        it.setToolTip(f"Page {row + 1}" + (f", originally page {p + 1}" if p != row else "") +
+                      (f", rotated {rot}°" if rot else ""))
+
+    def _update_info(self):
+        n, sel = self.grid.count(), len(self.grid.selectedItems())
+        text = f"{n} page{'s' if n != 1 else ''}"
+        if sel:
+            text += f" · {sel} selected"
+        dirty = self.is_dirty()
+        if dirty:
+            text += " · <b>unsaved changes</b>"
+        self.info.setText(text)
+        for b in (self.b_left, self.b_right, self.b_back, self.b_fwd, self.b_delete, self.b_extract):
+            b.setEnabled(sel > 0)
+        self.b_undo.setEnabled(bool(self.history))
+        self.b_reset.setEnabled(dirty)
+        self.b_save.setEnabled(self.doc is not None)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -956,10 +1294,19 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(ico)))
 
         self.view = PdfView()
-        self.setCentralWidget(self.view)
+        self.organize = OrganizeView()
+        self.organize.changed.connect(self._organize_changed)
+        self.organize.extractRequested.connect(self.extract)
+        self.organize.splitRequested.connect(self.split)
+        self.organize.saveRequested.connect(self.save_organized)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.view)
+        self.stack.addWidget(self.organize)
+        self.setCentralWidget(self.stack)
         self.empty = QLabel("Open a PDF  (Ctrl+O)  or drop one here", self.view)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty.setStyleSheet("font-size: 15px; color: palette(placeholder-text);")
+        self.empty.setStyleSheet("font-size: 15px;")
+        self.empty.setForegroundRole(QPalette.ColorRole.PlaceholderText)
 
         self.thumbs = ThumbList()
         self.thumbs.itemClicked.connect(lambda it: self.view.go_to(self.thumbs.row(it)))
@@ -992,6 +1339,11 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(bytes.fromhex(g))
         else:
             self.resize(1200, 860)
+        self.dock.setVisible(self.settings.get("pages_panel", True))
+        fit = self.settings.get("fit", "width")
+        self.view.fit = fit if fit in ("width", "page") else None
+        if self.view.fit is None:
+            self.view.canvas.zoom = float(self.settings.get("zoom", 1.0))
         self._set_enabled(False)
         self._title()
 
@@ -1066,6 +1418,11 @@ class MainWindow(QMainWindow):
         tb.addAction(self.a_fitp)
         tb.addSeparator()
 
+        self.a_organize = self._act("Organize", self.toggle_organize, "Ctrl+G", SP.SP_FileDialogContentsView,
+                                    "See all pages at once: reorder, rotate, delete and extract")
+        self.a_organize.setCheckable(True)
+        tb.addAction(self.a_organize)
+        tb.widgetForAction(self.a_organize).setStyleSheet("font-weight: 600;")
         self.a_split = self._act("Split", self.split, "Ctrl+Shift+S", SP.SP_FileDialogDetailedView,
                                  "Split into several PDFs")
         self.a_extract = self._act("Extract pages", self.extract, "Ctrl+E", SP.SP_FileDialogNewFolder,
@@ -1083,17 +1440,35 @@ class MainWindow(QMainWindow):
                                 "Use these tools from your phone on the same Wi-Fi")
         self.a_wifi.setCheckable(True)
         tb.addAction(self.a_wifi)
-        self.a_folder = self._act("", self._show_current, None, SP.SP_DirOpenIcon, "Show file in Explorer")
+        self.theme_btn = QToolButton()
+        self.theme_btn.setText("Theme")
+        self.theme_btn.setToolTip("Light or dark look")
+        self.theme_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self.theme_btn)
+        group = QActionGroup(self)
+        current = self.settings.get("theme", "system")
+        for key, label in (("system", "Match system"), ("light", "Light"), ("dark", "Dark")):
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == current)
+            a.triggered.connect(lambda _=False, k=key: self.set_theme(k))
+            group.addAction(a)
+        self.theme_btn.setMenu(menu)
+        tb.addWidget(self.theme_btn)
+        self.a_folder = self._act("", self._show_current, None, SP.SP_DirOpenIcon,
+                                  "Show file in Finder" if sys.platform == "darwin" else "Show file in Explorer")
         tb.addAction(self.a_folder)
         self.a_about = self._act("", self.about, "F1", SP.SP_MessageBoxInformation, "About")
         tb.addAction(self.a_about)
 
     def _set_enabled(self, on):
-        for a in (self.a_prev, self.a_next, self.a_zin, self.a_zout, self.a_fitw, self.a_fitp, self.a_split,
-                  self.a_extract, self.a_compress, self.a_folder):
+        for a in (self.a_split, self.a_extract, self.a_compress, self.a_folder, self.a_organize):
             a.setEnabled(on)
-        self.page_box.setEnabled(on)
-        self.zoom_box.setEnabled(on)
+        viewing = on and not self.organizing()
+        for a in (self.a_prev, self.a_next, self.a_zin, self.a_zout, self.a_fitw, self.a_fitp):
+            a.setEnabled(viewing)
+        self.page_box.setEnabled(viewing)
+        self.zoom_box.setEnabled(viewing)
         self.empty.setVisible(not on)
 
     def _title(self):
@@ -1121,6 +1496,9 @@ class MainWindow(QMainWindow):
             doc.close()
             QMessageBox.warning(self, APP_NAME, f"{path.name} is not a PDF.")
             return
+        if not self.confirm_discard():
+            doc.close()
+            return
         password = None
         while doc.needs_pass and doc.is_encrypted:   # needs_pass stays True after unlocking; is_encrypted clears
             pw, ok = QInputDialog.getText(self, "Password required", f"{path.name} is protected. Password:",
@@ -1134,6 +1512,7 @@ class MainWindow(QMainWindow):
         self.doc, self.path, self.password = doc, path, password
         self.view.set_doc(doc)
         self.thumbs.set_doc(doc)
+        self.organize.set_doc(doc)
         self.page_box.setRange(1, doc.page_count)
         self.page_box.setValue(1)
         self.of_label.setText(f" / {doc.page_count} ")
@@ -1145,6 +1524,7 @@ class MainWindow(QMainWindow):
 
     def close_doc(self):
         self.thumbs.set_doc(None)
+        self.organize.set_doc(None)
         self.view.set_doc(None)
         if self.doc:
             self.doc.close()
@@ -1227,27 +1607,108 @@ class MainWindow(QMainWindow):
         elif b_open is not None and box.clickedButton() is b_open:
             self.open_file(open_pdf)
 
+    # ---------------------------------------------------------------- organize
+    def organizing(self):
+        return self.stack.currentWidget() is self.organize
+
+    def toggle_organize(self):
+        on = self.a_organize.isChecked() and self.doc is not None
+        self.a_organize.setChecked(on)
+        if on:
+            self._dock_was_visible = self.dock.isVisible()
+            self.dock.hide()
+            self.stack.setCurrentWidget(self.organize)
+            self.organize.grid.setFocus()
+        else:
+            self.stack.setCurrentWidget(self.view)
+            self.dock.setVisible(getattr(self, "_dock_was_visible", True))
+        self._set_enabled(self.doc is not None)
+        self._organize_changed()
+
+    def _organize_changed(self):
+        dirty = self.organize.is_dirty()
+        self.a_organize.setText("Organize •" if dirty else "Organize")
+        self.a_organize.setToolTip("Organize has unsaved changes" if dirty else
+                                   "See all pages at once: reorder, rotate, delete and extract")
+
+    def arrangement(self):
+        """The pages the tools work on: Organize's order/rotation when it's open, else every page in order."""
+        if self.organizing():
+            return self.organize.entries()
+        return list(range(self.doc.page_count))
+
+    def save_organized(self):
+        if not self.doc:
+            return
+        start = str(self.path.parent / f"{self.path.stem}_organized.pdf")
+        p, _ = QFileDialog.getSaveFileName(self, "Save organized PDF", start, "PDF files (*.pdf)")
+        if not p:
+            return
+        out = Path(p).with_suffix(".pdf")
+        if out.resolve() == self.path.resolve():
+            QMessageBox.warning(self, "Organize", "Choose a different file name; the original PDF is kept unchanged.")
+            return
+        if out.exists():
+            out.unlink()
+        ents = self.organize.entries()
+
+        def done(path):
+            self.organize.mark_saved()
+            self._organize_changed()
+            self._report("Organize", f"Saved {len(ents)} page{'s' if len(ents) != 1 else ''} "
+                                     f"({human_size(Path(path).stat().st_size)}) to\n{path}", path, open_pdf=path)
+
+        self._run("Saving…", engine.save_arranged, str(self.path), ents, str(out), self.password, on_done=done)
+
+    def confirm_discard(self):
+        """Before closing the document: offer to save Organize changes. False means stay."""
+        if not self.organize.is_dirty():
+            return True
+        r = QMessageBox.question(self, "Organize", "Organize has unsaved changes. Save them as a new PDF first?",
+                                 QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
+                                 QMessageBox.StandardButton.Cancel)
+        if r == QMessageBox.StandardButton.Save:
+            self.save_organized()
+            return False   # saving runs in the background; the user can open/close again afterwards
+        return r == QMessageBox.StandardButton.Discard
+
+    # ---------------------------------------------------------------- theme
+    def set_theme(self, key):
+        self.settings["theme"] = key
+        apply_theme(key)
+        save_settings(self.settings)
+
+    # ---------------------------------------------------------------- tools
     def split(self, ranges=""):
         if not self.doc:
             return
-        d = SplitDialog(self, self.path, self.doc.page_count, ranges if isinstance(ranges, str) else "")
+        ents = self.arrangement()
+        d = SplitDialog(self, self.path, len(ents), ranges if isinstance(ranges, str) else "")
         if d.exec() != QDialog.DialogCode.Accepted:
             return
         out = d.out.path()
-        self._run("Splitting…", engine.split_groups, str(self.path), d.result_groups, str(out), self.password,
+        groups = [[ents[i] for i in g] for g in d.result_groups]
+        self._run("Splitting…", engine.split_groups, str(self.path), groups, str(out), self.password,
                   on_done=lambda files: self._report(
                       "Split PDF", f"Created {len(files)} file{'s' if len(files) != 1 else ''} in\n{out}", out))
 
-    def extract(self, pages=None):
+    def extract(self, positions=None):
         if not self.doc:
             return
-        if not isinstance(pages, list) or not pages:
-            pages = self.thumbs.selected_pages() if len(self.thumbs.selectedItems()) > 1 else [self.view.current_page()]
-        d = ExtractDialog(self, self.path, self.doc.page_count, pages, self.password, self.settings.get("compress"))
+        ents = self.arrangement()
+        if not isinstance(positions, list) or not positions:
+            if self.organizing():
+                positions = self.organize.selected_positions() or [0]
+            else:
+                positions = self.thumbs.selected_pages() if len(self.thumbs.selectedItems()) > 1 \
+                    else [self.view.current_page()]
+        saved = {"compress": self.settings.get("compress"), "extract_each": self.settings.get("extract_each", False)}
+        d = ExtractDialog(self, self.path, ents, positions, self.password, saved)
         if d.exec() != QDialog.DialogCode.Accepted:
             return
+        self.settings["extract_each"] = d.saved.get("extract_each", False)
         if d.result_compress:
-            self.settings["compress"] = d.saved
+            self.settings["compress"] = d.saved.get("compress")
         sel, out, comp = d.result_pages, d.result_path, d.result_compress
         n = len(sel)
         if d.result_one:
@@ -1263,13 +1724,18 @@ class MainWindow(QMainWindow):
     def compress(self):
         if not self.doc:
             return
-        d = CompressDialog(self, self.path, self.password, self.settings)
+        arranged = self.organizing() and self.organize.is_dirty()
+        ents = self.organize.entries() if arranged else None
+        d = CompressDialog(self, self.path, self.password, self.settings, ents)
         if d.exec() != QDialog.DialogCode.Accepted:
             return
         self.settings["compress"] = d.opts.remember()
         src = self.path
+        before = src.stat().st_size
 
         def done(r):
+            if arranged:   # extract() returns the path of the organized, reduced copy
+                r = {"before": before, "after": Path(r).stat().st_size, "written": True, "path": r}
             if not r["written"]:
                 QMessageBox.information(self, "Reduce file size",
                                         f"{src.name} is already well optimised ({human_size(r['before'])}).\n\n"
@@ -1278,11 +1744,16 @@ class MainWindow(QMainWindow):
                 return
             saved = 100 * (1 - r["after"] / r["before"])
             self._report("Reduce file size",
-                         f"{human_size(r['before'])}  →  {human_size(r['after'])}   ({saved:.0f}% smaller)\n\n"
-                         f"Saved as {r['path']}", r["path"], open_pdf=r["path"])
+                         f"{human_size(r['before'])}  →  {human_size(r['after'])}   ({saved:.0f}% smaller)"
+                         + ("\n(with your Organize changes)" if arranged else "") + f"\n\nSaved as {r['path']}",
+                         r["path"], open_pdf=r["path"])
 
-        self._run("Compressing…", engine.compress, str(src), str(d.result_path), password=self.password,
-                  on_done=done, **d.opts.options())
+        if arranged:
+            self._run("Compressing…", engine.extract, str(src), ents, str(d.result_path), self.password,
+                      d.opts.options(), on_done=done)
+        else:
+            self._run("Compressing…", engine.compress, str(src), str(d.result_path), password=self.password,
+                      on_done=done, **d.opts.options())
 
     def _show_current(self):
         if self.path:
@@ -1386,13 +1857,46 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "Please wait for the current job to finish.")
             e.ignore()
             return
+        if not self.confirm_discard():
+            e.ignore()
+            return
         if self.wifi_proc is not None:
             self.wifi_stop()
         jobs.shutdown()
         self.settings["geometry"] = bytes(self.saveGeometry()).hex()
+        self.settings["pages_panel"] = self.dock.isVisible() if not self.organizing() else             getattr(self, "_dock_was_visible", True)
+        self.settings["fit"] = self.view.fit or "zoom"
+        self.settings["zoom"] = self.view.canvas.zoom
         save_settings(self.settings)
         self.close_doc()
         super().closeEvent(e)
+
+
+def apply_theme(key):
+    """'light', 'dark' or 'system'. Qt 6.8+ switches the whole app's colours live."""
+    scheme = {"light": Qt.ColorScheme.Light, "dark": Qt.ColorScheme.Dark}.get(key, Qt.ColorScheme.Unknown)
+    try:
+        QApplication.styleHints().setColorScheme(scheme)
+    except AttributeError:
+        pass
+
+
+class App(QApplication):
+    """Handles macOS "Open With" / dropping a PDF on the Dock icon."""
+    def __init__(self, argv):
+        super().__init__(argv)
+        self.window = None
+        self.pending = None
+
+    def event(self, e):
+        if e.type() == e.Type.FileOpen:
+            f = e.file()
+            if self.window is not None:
+                self.window.open_file(f)
+            else:
+                self.pending = f
+            return True
+        return super().event(e)
 
 
 def main(argv=None):
@@ -1403,13 +1907,17 @@ def main(argv=None):
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"dl.{APP_NAME}")
         except Exception:
             pass
-    app = QApplication(argv)
+    app = App(argv)
     app.setApplicationName(APP_NAME)
+    apply_theme(load_settings().get("theme", "system"))
     ico = asset("icon.ico")
     if ico:
         app.setWindowIcon(QIcon(str(ico)))
     win = MainWindow()
+    app.window = win
     win.show()
+    if app.pending:
+        QTimer.singleShot(0, lambda: win.open_file(app.pending))
     QTimer.singleShot(300, jobs.warm_up)   # start the worker processes while the user picks a file
     files = [a for a in argv[1:] if not a.startswith("-")]
     if files:

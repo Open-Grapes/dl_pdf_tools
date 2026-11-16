@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "dl_pdf_tools"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 RELEASE_ASSET = f"{APP_NAME}-windows.zip"
 
 FROZEN = getattr(sys, "frozen", False)
@@ -14,7 +14,10 @@ FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).resolve().parent.parent
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 
-CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / APP_NAME
+if sys.platform == "darwin":
+    CONFIG_DIR = Path.home() / "Library" / "Application Support" / APP_NAME
+else:
+    CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / APP_NAME
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
 

@@ -12,11 +12,16 @@
   --ok: #2e7d32; --hover: #eceef2; --shadow: 0 1px 4px rgba(0,0,0,.18);
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #1c1d22; --panel: #26282f; --text: #e6e7ea; --muted: #a3a8b3; --line: #3a3d46;
     --accent: #4b8bf5; --on-accent: #ffffff; --canvas: #141518; --sel: #2c4a7c; --danger: #ff7070;
     --ok: #5cc46a; --hover: #30333b; --shadow: 0 1px 4px rgba(0,0,0,.7);
   }
+}
+:root[data-theme="dark"] {
+    --bg: #1c1d22; --panel: #26282f; --text: #e6e7ea; --muted: #a3a8b3; --line: #3a3d46;
+    --accent: #4b8bf5; --on-accent: #ffffff; --canvas: #141518; --sel: #2c4a7c; --danger: #ff7070;
+    --ok: #5cc46a; --hover: #30333b; --shadow: 0 1px 4px rgba(0,0,0,.7);
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -104,6 +109,7 @@ label.opt input { flex: none; }
 #gridBody .thumb { width: auto; margin: 0; }
 @media (max-width: 760px) {
   aside, .desk-only { display: none !important; }
+  #themeSel { width: 100%; }
   #fname, .brand span { display: none; }
   .mobile-only { display: inline-block; }
   header { gap: 6px; padding: 8px; }
@@ -141,6 +147,9 @@ label.opt input { flex: none; }
     <button class="needs-doc" id="compressBtn">Reduce size</button>
   </div>
   <div class="grow"></div>
+  <select id="themeSel" aria-label="Theme" title="Light or dark look">
+    <option value="system">Theme: System</option><option value="light">Theme: Light</option>
+    <option value="dark">Theme: Dark</option></select>
 </header>
 
 <div id="wrap">
@@ -796,6 +805,16 @@ $("compressGo").onclick = async () => {
     }
   } catch (e) { idle(); d.showModal(); d.querySelector("[data-err]").textContent = e.message; }
 };
+
+// ------------------------------------------------------------------ theme (remembered in this browser)
+function setTheme(t) {
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  $("themeSel").value = t;
+  store.set("theme", t);
+}
+$("themeSel").onchange = () => setTheme($("themeSel").value);
+setTheme(store.get("theme", "system"));
 
 // ------------------------------------------------------------------ start
 document.querySelectorAll(".needs-doc").forEach((b) => (b.disabled = true));

@@ -119,11 +119,32 @@ def _runs(pages):
     return runs
 
 
+def entry(e):
+    """A page in a tool's page list: a 0-based page number, or (page, extra_rotation) from Organize."""
+    return (int(e), 0) if isinstance(e, int) else (int(e[0]), int(e[1]) % 360)
+
+
+def page_of(e):
+    return entry(e)[0]
+
+
 def _subset_bytes(src_doc, pages, fast=False):
     new = pymupdf.open()
     try:
-        for a, b in _runs(pages):
-            new.insert_pdf(src_doc, from_page=a, to_page=b)
+        ents = [entry(e) for e in pages]
+        i = 0
+        while i < len(ents):
+            p, rot = ents[i]
+            if rot:   # rotated by Organize: copy alone and turn it
+                new.insert_pdf(src_doc, from_page=p, to_page=p)
+                new[-1].set_rotation((src_doc[p].rotation + rot) % 360)
+                i += 1
+                continue
+            j = i   # copy a run of consecutive unrotated pages in one go
+            while j + 1 < len(ents) and ents[j + 1] == (ents[j][0] + 1, 0):
+                j += 1
+            new.insert_pdf(src_doc, from_page=p, to_page=ents[j][0])
+            i = j + 1
         return new.tobytes(garbage=1) if fast else new.tobytes(garbage=3, deflate=True)
     finally:
         new.close()
@@ -152,6 +173,7 @@ def _write_pages(src_doc, pages, out_path, compress=None):
 
 
 def _label(pages):
+    pages = [page_of(e) for e in pages]
     a, b = pages[0] + 1, pages[-1] + 1
     contiguous = pages == list(range(pages[0], pages[-1] + 1))
     if a == b:
@@ -178,7 +200,8 @@ def extract_each(src, pages, out_dir, password=None, progress=None, compress=Non
     try:
         width = len(str(doc.page_count))
         for i, p in enumerate(pages):
-            out.append(_write_pages(doc, [p], Path(out_dir) / f"{stem}_p{p + 1:0{width}d}.pdf", compress))
+            n = page_of(p) + 1
+            out.append(_write_pages(doc, [p], Path(out_dir) / f"{stem}_p{n:0{width}d}.pdf", compress))
             if progress:
                 progress(i + 1, len(pages))
         return out
@@ -197,20 +220,26 @@ def split_every(src, n, out_dir, password=None, progress=None):
     return split_groups(src, groups, out_dir, password, progress)
 
 
-def split_groups(src, groups, out_dir, password=None, progress=None):
-    """Write each group of 0-based pages to its own file."""
+def split_groups(src, groups, out_dir, password=None, progress=None, compress=None):
+    """Write each group of 0-based pages (or Organize entries) to its own file."""
     doc = open_doc(src, password)
     stem, out = Path(src).stem, []
     try:
         width = max(2, len(str(len(groups))))
         for i, g in enumerate(groups):
             name = f"{stem}_part{i + 1:0{width}d}_{_label(g)}.pdf"
-            out.append(_write_pages(doc, g, Path(out_dir) / name))
+            out.append(_write_pages(doc, g, Path(out_dir) / name, compress))
             if progress:
                 progress(i + 1, len(groups))
         return out
     finally:
         doc.close()
+
+
+def save_arranged(src, entries, out_path, password=None, compress=None):
+    """Organize: write the pages in the given order and rotation (deleted pages left out) as a new PDF.
+    The original file is never changed."""
+    return extract(src, entries, out_path, password, compress)
 
 
 # ---------------------------------------------------------------- compress
@@ -271,7 +300,7 @@ def estimate(src, opts, pages=None, password=None, sample=SAMPLE_PAGES):
     """
     doc = open_doc(src, password)
     try:
-        target = list(pages) if pages else list(range(doc.page_count))
+        target = [entry(e) for e in pages] if pages else list(range(doc.page_count))
         whole = pages is None
         if whole and len(target) <= sample:
             base = os.path.getsize(src)

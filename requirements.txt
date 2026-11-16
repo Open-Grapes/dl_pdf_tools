@@ -1,0 +1,4 @@
+pymupdf>=1.25
+PySide6-Essentials>=6.7
+pyinstaller>=6.0
+pillow>=10.0

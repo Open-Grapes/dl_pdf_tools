@@ -80,6 +80,8 @@ dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top
 dialog .err { color: var(--danger); min-height: 1.4em; margin-top: 6px; }
 dialog .preview { color: var(--muted); margin-top: 6px; }
 label.opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+dialog label.opt.row { flex-wrap: nowrap; }
+label.opt input { flex: none; }
 .cp-grid { display: grid; grid-template-columns: 1fr auto; gap: 6px 14px; align-items: center; }
 .cp-est { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cp-custom { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -91,9 +93,28 @@ label.opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }
            animation: spin 0.9s linear infinite; margin: 6px auto 14px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 #busy { width: 340px; text-align: center; }
+.mobile-only { display: none; }
+#grid { position: fixed; inset: 0; z-index: 50; background: var(--bg); display: flex; flex-direction: column; }
+.grid-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--panel);
+             border-bottom: 1px solid var(--line); }
+.grid-head .grow { flex: 1; }
+#gridSelect.on { background: var(--sel); border-color: var(--accent); }
+#gridBody { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+            gap: 10px; padding: 12px; align-content: start; }
+#gridBody .thumb { width: auto; margin: 0; }
 @media (max-width: 760px) {
-  aside { display: none; }
+  aside, .desk-only { display: none !important; }
   #fname, .brand span { display: none; }
+  .mobile-only { display: inline-block; }
+  header { gap: 6px; padding: 8px; }
+  header button, dialog button { padding: 8px 12px; }
+  .tools { width: 100%; }
+  .tools button { flex: 1; padding: 9px 6px; }
+  #pages { padding: 8px; gap: 8px; }
+  .cp-detail { display: none; }
+  dialog { padding: 16px; }
+  dialog .row > input[type=text] { min-width: 0; }
+  footer #info { display: none; }
 }
 </style>
 </head>
@@ -102,17 +123,18 @@ label.opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }
   <div class="brand"><img src="/icon.png" alt=""><span>dl_pdf_tools</span></div>
   <button id="openBtn" class="primary" title="Open a PDF (Ctrl+O)">Open PDF</button>
   <input id="fileInput" type="file" accept="application/pdf,.pdf" hidden>
+  <button id="pagesBtn" class="needs-doc mobile-only">Pages</button>
   <span id="fname"></span>
-  <div class="sep"></div>
+  <div class="sep desk-only"></div>
   <button class="icon needs-doc" id="prevBtn" title="Previous page">▲</button>
   <input id="pageNo" class="needs-doc" type="text" inputmode="numeric" aria-label="Page number">
   <span id="pageCount">/ 0</span>
   <button class="icon needs-doc" id="nextBtn" title="Next page">▼</button>
-  <div class="sep"></div>
-  <button class="icon needs-doc" id="zoomOut" title="Zoom out (Ctrl −)">−</button>
-  <select id="zoomSel" class="needs-doc" aria-label="Zoom"></select>
-  <button class="icon needs-doc" id="zoomIn" title="Zoom in (Ctrl +)">+</button>
-  <div class="sep"></div>
+  <div class="sep desk-only"></div>
+  <button class="icon needs-doc desk-only" id="zoomOut" title="Zoom out (Ctrl −)">−</button>
+  <select id="zoomSel" class="needs-doc desk-only" aria-label="Zoom"></select>
+  <button class="icon needs-doc desk-only" id="zoomIn" title="Zoom in (Ctrl +)">+</button>
+  <div class="sep desk-only"></div>
   <div class="tools" style="display:flex;gap:8px;flex-wrap:wrap">
     <button class="needs-doc" id="splitBtn">Split</button>
     <button class="needs-doc" id="extractBtn">Extract pages</button>
@@ -135,6 +157,11 @@ label.opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }
     </div>
   </div>
 </div>
+<div id="grid" hidden>
+  <div class="grid-head"><b id="gridTitle">Pages</b><span class="grow"></span>
+    <button id="gridSelect">Select</button><button id="gridDone" class="primary">Done</button></div>
+  <div id="gridBody"></div>
+</div>
 <footer><span id="status">Ready</span><span id="info"></span></footer>
 
 <!-- Split -->
@@ -155,7 +182,7 @@ label.opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 <dialog id="extractDlg">
   <h2>Extract pages</h2><div class="sub" data-sub></div>
   <div class="row"><span>Pages:</span><input type="text" id="exPages" placeholder="e.g. 1-3, 5, 8-"></div>
-  <div class="note">Tip: Ctrl- or Shift-click thumbnails to select pages before opening this.</div>
+  <div class="note" id="exTip">Tip: Ctrl- or Shift-click thumbnails to select pages before opening this.</div>
   <label class="opt row"><input type="radio" name="exMode" value="one" checked> Into one new PDF</label>
   <label class="opt row"><input type="radio" name="exMode" value="each"> Each page as a separate PDF (downloads as .zip)</label>
   <div class="row" style="margin-top:12px">
@@ -212,6 +239,10 @@ const ZOOMS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5
 let doc = null;            // {id, name, size, pages: [[w, h], ...]}
 let zoom = 1, fit = "width", current = 0, lastClick = null;
 const selection = new Set();
+const MOBILE = matchMedia("(max-width: 760px)");
+const TOUCH = matchMedia("(pointer: coarse)").matches;
+const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+let selectMode = false;
 let presets = {};
 
 const store = {
@@ -234,6 +265,8 @@ function human(n) {
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return i === 0 ? `${n} B` : `${n.toFixed(1)} ${u[i]}`;
 }
+const WHERE_TEXT = IOS ? "Tap Download; it saves to the Files app → Downloads."
+  : TOUCH ? "Tap Download to save it to your phone." : "Look in your browser's Downloads.";
 function plural(n, w) { return `${n} ${w}${n === 1 ? "" : "s"}`; }
 function pageUrl(n, w) { return `/api/page?id=${doc.id}&n=${n}&w=${w}&t=${encodeURIComponent(TOKEN)}`; }
 function status(t) { $("status").textContent = t; }
@@ -287,9 +320,11 @@ function showResult(title, big, text, url) {
   d.querySelector("[data-big]").textContent = big;
   d.querySelector("[data-text]").textContent = text;
   $("resultAgain").hidden = !url;
+  $("resultAgain").textContent = TOUCH ? "Download" : "Download again";
+  $("resultAgain").className = TOUCH ? "primary" : "";
   $("resultAgain").onclick = () => download(url);
   d.showModal();
-  if (url) download(url);
+  if (url && !TOUCH) download(url);
 }
 
 document.querySelectorAll("dialog [data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
@@ -382,7 +417,7 @@ function load(info) {
   $("empty").hidden = true;
   document.querySelectorAll(".needs-doc").forEach((b) => (b.disabled = false));
   io.disconnect();
-  pagesEl.innerHTML = ""; thumbsEl.innerHTML = "";
+  pagesEl.innerHTML = ""; thumbsEl.innerHTML = ""; $("gridBody").innerHTML = "";
   pageEls = info.pages.map(([w, h], i) => {
     const d = document.createElement("div");
     d.className = "page"; d.dataset.n = i;
@@ -395,6 +430,10 @@ function load(info) {
       `<img loading="lazy" alt="" src="${pageUrl(i, 260)}"></div><span>${i + 1}</span>`;
     t.addEventListener("click", (e) => thumbClick(i, e));
     thumbsEl.appendChild(t);
+    const g = t.cloneNode(true);
+    g.querySelector("img").loading = "lazy";
+    g.addEventListener("click", () => gridTap(i));
+    $("gridBody").appendChild(g);
     return d;
   });
   fit = "width";
@@ -405,7 +444,7 @@ function load(info) {
 function fitZoom() {
   if (!doc) return 1;
   const maxW = Math.max(...doc.pages.map((p) => p[0]));
-  const vw = view.clientWidth - 40;
+  const vw = view.clientWidth - (MOBILE.matches ? 16 : 40);
   if (fit === "page") {
     const [w, h] = doc.pages[current];
     return Math.min(vw / (w * PT), (view.clientHeight - 40) / (h * PT));
@@ -490,8 +529,27 @@ function thumbClick(i, e) {
   } else {
     selection.clear(); selection.add(i); lastClick = i; goTo(i);
   }
-  [...thumbsEl.children].forEach((t, k) => t.classList.toggle("sel", selection.has(k)));
-  status(selection.size > 1 ? `${selection.size} pages selected — use Extract pages to save them` : "");
+  showSelection();
+}
+function showSelection() {
+  for (const box of [thumbsEl, $("gridBody")]) [...box.children].forEach((t, k) => t.classList.toggle("sel", selection.has(k)));
+  status(selection.size > 1 ? `${plural(selection.size, "page")} selected — use Extract pages to save them` : "");
+  $("gridTitle").textContent = selectMode ? `${plural(selection.size, "page")} selected` : "Pages";
+}
+
+// Phone: full-screen page grid. Tap to jump to a page, or Select to pick pages for Extract.
+$("pagesBtn").onclick = () => { $("grid").hidden = false; showSelection(); };
+$("gridDone").onclick = () => { $("grid").hidden = true; };
+$("gridSelect").onclick = () => {
+  selectMode = !selectMode;
+  if (selectMode) selection.clear();
+  $("gridSelect").classList.toggle("on", selectMode);
+  $("gridSelect").textContent = selectMode ? "Selecting…" : "Select";
+  showSelection();
+};
+function gridTap(i) {
+  if (selectMode) { selection.has(i) ? selection.delete(i) : selection.add(i); showSelection(); }
+  else { $("grid").hidden = true; goTo(i); }
 }
 
 // ------------------------------------------------------------------ drag & drop, keys, lifetime
@@ -529,7 +587,7 @@ function CompressPanel(root, pagesText) {
     <div class="cp-grid">
       ${Object.entries(presets).map(([k, p]) => `
         <label class="opt cp-choice"><input type="radio" name="cp${uid}" value="${k}"> ${p.label}
-          <span class="cp-est" style="text-align:left">(${p.dpi} dpi, quality ${p.quality})</span></label>
+          <span class="cp-est cp-detail" style="text-align:left">(${p.dpi} dpi, quality ${p.quality})</span></label>
         <span class="cp-est" data-est="${k}"></span>`).join("")}
       <div class="cp-custom cp-choice"><label class="opt"><input type="radio" name="cp${uid}" value="custom"> Custom</label>
         <input type="number" data-dpi min="36" max="600" step="1"> dpi
@@ -639,7 +697,7 @@ $("splitGo").onclick = async () => {
     const r = await api("/api/split", body);
     idle();
     showResult("Split PDF", `${plural(r.files, "file")} created`,
-      `Downloading ${r.name} (${human(r.size)}). Look in your browser's Downloads.`, r.url);
+      `Downloading ${r.name} (${human(r.size)}). ${WHERE_TEXT}`, r.url);
   } catch (e) { idle(); d.showModal(); d.querySelector("[data-err]").textContent = e.message; }
 };
 
@@ -649,7 +707,9 @@ $("extractBtn").onclick = () => {
   const d = $("extractDlg");
   d.querySelector("[data-sub]").textContent = `${doc.name} — ${plural(doc.pages.length, "page")}`;
   d.querySelector("[data-err]").textContent = "";
-  $("exPages").value = formatRanges(selection.size > 1 ? [...selection] : [current]);
+  $("exPages").value = formatRanges(selection.size ? [...selection] : [current]);
+  $("exTip").textContent = TOUCH || MOBILE.matches ? "Tip: tap Pages → Select to pick pages before opening this."
+    : "Tip: Ctrl- or Shift-click thumbnails to select pages before opening this.";
   $("exShrink").checked = false; $("exShrinkOpts").disabled = true; $("exShrinkInfo").textContent = ""; exOpts = null;
   exPreview(); d.showModal();
 };
@@ -704,7 +764,7 @@ $("extractGo").onclick = async () => {
     idle();
     const n = countPages(body.pages, doc.pages.length);
     showResult("Extract pages", each ? `${plural(r.files, "file")} created` : `${plural(n, "page")} extracted`,
-      `Downloading ${r.name} (${human(r.size)}). Look in your browser's Downloads.`, r.url);
+      `Downloading ${r.name} (${human(r.size)}). ${WHERE_TEXT}`, r.url);
   } catch (e) { idle(); d.showModal(); d.querySelector("[data-err]").textContent = e.message; }
 };
 
@@ -732,7 +792,7 @@ $("compressGo").onclick = async () => {
         "Try the Strong preset or a lower custom resolution.", null);
     } else {
       showResult("Reduce file size", `${human(r.before)} → ${human(r.after)}  (${Math.round(100 * (1 - r.after / r.before))}% smaller)`,
-        `Downloading ${r.name}. Look in your browser's Downloads.`, r.url);
+        `Downloading ${r.name}. ${WHERE_TEXT}`, r.url);
     }
   } catch (e) { idle(); d.showModal(); d.querySelector("[data-err]").textContent = e.message; }
 };

@@ -33,6 +33,23 @@ It all runs on your own computer. The page talks to a small server that only thi
 protected by a random key for each session. Your PDFs never go to the internet. The server stops by itself a
 minute after you close the page.
 
+## Use it from your phone (Share via Wi-Fi)
+
+Click **Share via Wi-Fi** in the toolbar. A window shows a QR code and two addresses, such as
+`http://192.168.0.106` and `http://dl-pdf-tools.local`. On your phone (on the same Wi-Fi), point the camera at the
+code or type an address into Safari or Chrome. You get the same viewer and tools, laid out for a phone:
+
+- **Open PDF** picks a file from the phone (Files, iCloud Drive, …).
+- **Pages** shows every page as a grid. Tap a page to jump to it, or tap **Select** and then pages to pick them for
+  Extract pages.
+- Results download to the phone. On iPhone, tap **Download** and find the file in the Files app → Downloads.
+
+The PC does the work, so it must be on with dl_pdf_tools open. Sharing stays on until you click **Turn off** or close
+the app. There's no password, so anyone on the same Wi-Fi who knows the address can open the page while sharing is on.
+
+**Phone can't connect?** The first time, Windows asks whether to allow dl_pdf_tools on networks: allow it on
+*Private networks*. Your Wi-Fi must also be set to *Private* in Windows Settings → Network & internet.
+
 ## Run from source
 
 ```

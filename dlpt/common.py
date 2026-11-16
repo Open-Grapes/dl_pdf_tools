@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "dl_pdf_tools"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 RELEASE_ASSET = f"{APP_NAME}-windows.zip"
 
 FROZEN = getattr(sys, "frozen", False)

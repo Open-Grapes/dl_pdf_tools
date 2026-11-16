@@ -15,22 +15,37 @@ _lock = threading.Lock()
 WORKERS = 2
 
 
+def wait_for_exit(pid):
+    """Block until process pid has ended."""
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(0x00100000, False, int(pid))   # SYNCHRONIZE
+        if handle:
+            k32.WaitForSingleObject(handle, 0xFFFFFFFF)
+            k32.CloseHandle(handle)
+    else:
+        import time
+        while True:
+            try:
+                os.kill(int(pid), 0)
+            except OSError:
+                return
+            time.sleep(2)
+
+
+def on_exit_of(pid, callback):
+    """Call callback() (on a background thread) once process pid has ended."""
+    def watch():
+        wait_for_exit(pid)
+        callback()
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def _exit_with_parent(parent_pid):
     """Runs in each worker: quit as soon as the app that started it is gone, even if it crashed or was
     ended from Task Manager, so no worker is ever left running on its own."""
-    def watch():
-        if os.name == "nt":
-            import ctypes
-            k32 = ctypes.windll.kernel32
-            handle = k32.OpenProcess(0x00100000, False, parent_pid)   # SYNCHRONIZE
-            if handle:
-                k32.WaitForSingleObject(handle, 0xFFFFFFFF)            # until the parent exits
-        else:
-            import time
-            while os.getppid() == parent_pid:
-                time.sleep(2)
-        os._exit(0)
-    threading.Thread(target=watch, daemon=True).start()
+    on_exit_of(parent_pid, lambda: os._exit(0))
 
 
 def _new_pool():

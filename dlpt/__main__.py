@@ -2,6 +2,7 @@
 
   dl_pdf_tools.exe [file.pdf]               open the window
   dl_pdf_tools.exe --web [--no-browser]     local web version: opens the tools in your browser
+  dl_pdf_tools.exe --wifi [PARENT_PID]      Share via Wi-Fi server for phones (started by the window)
   dl_pdf_tools.exe --selftest FILE.pdf DIR  run every operation (in worker processes) and write DIR\\selftest.txt
 """
 
@@ -27,6 +28,12 @@ def selftest(src, out_dir):
         log.append(f"split {len(jobs.run(engine.split_every, src, max(1, n // 2), out_dir))} files")
         r = jobs.run(engine.compress, src, out_dir / "compressed.pdf", **bal)
         log.append(f"compress {r['before']} -> {r['after']} written={r['written']}")
+        import qrcode
+        q = qrcode.QRCode(border=2)
+        q.add_data("http://192.168.0.2")
+        q.make(fit=True)
+        from zeroconf import ServiceInfo, Zeroconf  # noqa: F401  (Share via Wi-Fi libraries are bundled)
+        log.append(f"wifi libs ok, qr {len(q.get_matrix())}")
         log.append("OK")
     except Exception as e:
         import traceback
@@ -42,6 +49,9 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if args[:1] == ["--selftest"] and len(args) >= 3:
         return selftest(args[1], args[2])
+    if args[:1] == ["--wifi"]:   # started by the window's "Share via Wi-Fi" switch: --wifi [PARENT_PID]
+        from . import web
+        return web.serve_wifi(int(args[1]) if len(args) > 1 and args[1].isdigit() else None)
     if args[:1] == ["--web"]:
         from . import web
         return web.serve(open_browser="--no-browser" not in args)

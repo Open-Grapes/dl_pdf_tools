@@ -35,6 +35,12 @@ STATE = CONFIG_DIR / "web.json"
 WORK = CONFIG_DIR / "web"
 MAX_UPLOAD = 4 * 1024 ** 3
 
+# Share via Wi-Fi: the same page, reachable from a phone on the same network.
+WIFI_STATE = CONFIG_DIR / "wifi.json"     # written once the server is listening (or with an "error")
+WIFI_WORK = CONFIG_DIR / "wifi"
+WIFI_PORTS = (80, PREFERRED_PORT, 0)      # port 80 gives short addresses like http://192.168.0.20
+MDNS_HOST = "dl-pdf-tools"                # announced as http://dl-pdf-tools.local
+
 
 def _page_file():
     for base in (Path(__file__).parent, BUNDLE_DIR / "dlpt"):
@@ -46,9 +52,12 @@ def _page_file():
 class Server(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port, token):
-        super().__init__(("127.0.0.1", port), Handler)
-        self.token = token
+    def __init__(self, port, token, work=WORK, wifi_hosts=None):
+        """wifi_hosts: None for the local-only version; for Share via Wi-Fi, the host names the phone may
+        use (this PC's address and the .local name). Wi-Fi mode needs no token, like VLC's Wi-Fi sharing."""
+        super().__init__(("0.0.0.0" if wifi_hosts else "127.0.0.1", port), Handler)
+        self.token, self.work, self.wifi_hosts = token, work, wifi_hosts
+        self.quit_key = secrets.token_urlsafe(24)
         self.last_seen = time.time()
         self.lock = threading.Lock()
         self.render_lock = threading.Lock()   # MuPDF is not thread-safe: one render at a time in this process
@@ -95,7 +104,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _allowed(self):
         """Same-machine Host header (blocks DNS rebinding) and the session token."""
-        host = (self.headers.get("Host") or "").split(":")[0]
+        host = (self.headers.get("Host") or "").split(":")[0].lower()
+        if self.server.wifi_hosts:   # the Host check still blocks other websites (DNS rebinding)
+            return host in self.server.wifi_hosts
         if host not in ("127.0.0.1", "localhost"):
             return False
         tok = self.headers.get("X-Token") or self._query().get("t", "")
@@ -134,6 +145,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"app": APP_NAME, "version": APP_VERSION, "presets": engine.PRESETS})
             if path == "/api/heartbeat":
                 return self._send(200, {"ok": True})
+            if path == "/api/quit":   # the desktop app turning Share via Wi-Fi off (same PC + its secret)
+                if self.client_address[0] == "127.0.0.1" and self.server.wifi_hosts and \
+                        secrets.compare_digest(self.headers.get("X-Quit", ""), self.server.quit_key):
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    return self._send(200, {"ok": True})
+                return self._send(403, {"error": "forbidden"})
             if path == "/api/page":
                 return self._render()
             if path.startswith("/api/download/"):
@@ -199,7 +216,7 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0 or length > MAX_UPLOAD:
             raise BadRequest("The file is empty or too large.")
         iid = secrets.token_hex(8)
-        d = WORK / iid
+        d = self.server.work / iid
         d.mkdir(parents=True, exist_ok=True)
         src = d / name
         left = length
@@ -341,6 +358,86 @@ class Handler(BaseHTTPRequestHandler):
                     it["doc"].close()
                 shutil.rmtree(Path(it["src"]).parent, ignore_errors=True)
         return {"ok": True}
+
+
+# ---------------------------------------------------------------- Share via Wi-Fi
+
+def lan_ip():
+    """This PC's address on the local network (the adapter that has the default route), or None."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))   # picks the route; nothing is sent
+            ip = s.getsockname()[0]
+        return None if ip.startswith("127.") or ip.startswith("0.") else ip
+    except OSError:
+        return None
+
+
+def _announce(ip, port):
+    """Make http://dl-pdf-tools.local work on phones (mDNS / Bonjour). Returns a closer, or None."""
+    try:
+        from zeroconf import ServiceInfo, Zeroconf
+        zc = Zeroconf(interfaces=[ip])
+        info = ServiceInfo("_http._tcp.local.", f"{APP_NAME} on {socket.gethostname()}._http._tcp.local.",
+                           port=port, addresses=[socket.inet_aton(ip)], server=f"{MDNS_HOST}.local.",
+                           properties={"path": "/"})
+        zc.register_service(info, allow_name_change=True)
+
+        def close():
+            try:
+                zc.unregister_service(info)
+            finally:
+                zc.close()
+        return close
+    except Exception:
+        return None   # the IP address link still works
+
+
+def serve_wifi(parent_pid=None):
+    """Run the page for phones on this network until the desktop app (parent_pid) turns it off or quits."""
+    WIFI_STATE.unlink(missing_ok=True)
+    ip = lan_ip()
+    if not ip:
+        WIFI_STATE.write_text(json.dumps({"error": "This PC isn't connected to a network."}), encoding="utf-8")
+        return 1
+    shutil.rmtree(WIFI_WORK, ignore_errors=True)
+    WIFI_WORK.mkdir(parents=True, exist_ok=True)
+    hosts = {ip, f"{MDNS_HOST}.local", f"{socket.gethostname().lower()}.local", "127.0.0.1", "localhost"}
+    srv = None
+    for port in WIFI_PORTS:
+        try:
+            srv = Server(port, "", WIFI_WORK, hosts)
+            break
+        except OSError:
+            continue
+    if srv is None:
+        WIFI_STATE.write_text(json.dumps({"error": "Couldn't open a network port."}), encoding="utf-8")
+        return 1
+    port = srv.server_address[1]
+    suffix = "" if port == 80 else f":{port}"
+    close_mdns = _announce(ip, port)
+    urls = [f"http://{ip}{suffix}"] + ([f"http://{MDNS_HOST}.local{suffix}"] if close_mdns else [])
+    WIFI_STATE.write_text(json.dumps({"urls": urls, "port": port, "pid": os.getpid(), "quit": srv.quit_key}),
+                          encoding="utf-8")
+    if parent_pid:
+        jobs.on_exit_of(parent_pid, srv.shutdown)
+    jobs.warm_up()
+    try:
+        srv.serve_forever(poll_interval=0.5)
+    finally:
+        srv.server_close()
+        if close_mdns:
+            close_mdns()
+        jobs.shutdown()
+        with srv.lock:
+            for it in srv.items.values():
+                try:
+                    it["doc"].close()
+                except Exception:
+                    pass
+        shutil.rmtree(WIFI_WORK, ignore_errors=True)
+        WIFI_STATE.unlink(missing_ok=True)
+    return 0
 
 
 # ---------------------------------------------------------------- start / reuse

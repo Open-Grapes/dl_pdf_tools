@@ -1,9 +1,11 @@
 """dl_pdf_tools window: view a PDF, split it, extract pages and compress it."""
 
 import bisect
+import json
 import os
 import subprocess
 import sys
+import urllib.request
 from collections import OrderedDict
 from pathlib import Path
 
@@ -845,6 +847,99 @@ class CompressOptionsDialog(QDialog):
         self.resize(620, self.sizeHint().height())
 
 
+def _self_command(*args):
+    """Command line that starts this app again (the .exe when built, run.py from source)."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *args]
+    return [sys.executable, str(Path(__file__).resolve().parent.parent / "run.py"), *args]
+
+
+def qr_pixmap(text, size=240):
+    import qrcode
+    qr = qrcode.QRCode(border=2, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(text)
+    qr.make(fit=True)
+    m = qr.get_matrix()
+    n = len(m)
+    cell = max(1, size // n)
+    pm = QPixmap(n * cell, n * cell)
+    pm.fill(Qt.GlobalColor.white)
+    p = QPainter(pm)
+    for y, row in enumerate(m):
+        for x, on in enumerate(row):
+            if on:
+                p.fillRect(x * cell, y * cell, cell, cell, Qt.GlobalColor.black)
+    p.end()
+    return pm
+
+
+class WifiDialog(QDialog):
+    """Shows how to open the tools on a phone: a QR code and the addresses, plus the on/off switch."""
+    turnOff = Signal()
+    turnOn = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Share via Wi-Fi")
+        self.setModal(False)
+        lay = QVBoxLayout(self)
+        self.head = QLabel()
+        self.head.setStyleSheet("font-size: 15px; font-weight: 600;")
+        self.head.setWordWrap(True)
+        lay.addWidget(self.head)
+        self.qr = QLabel()
+        self.qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr.setMinimumSize(250, 250)
+        lay.addWidget(self.qr)
+        self.links = QLabel()
+        self.links.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.links.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.links.setOpenExternalLinks(True)
+        self.links.setStyleSheet("font-size: 16px;")
+        lay.addWidget(self.links)
+        self.note = _note(
+            "Your phone must be on the same Wi-Fi as this PC. Point the phone's camera at the code, or type an "
+            "address into Safari or Chrome. Sharing stays on until you turn it off or close dl_pdf_tools.<br><br>"
+            "<b>Phone can't connect?</b> When Windows asks, allow dl_pdf_tools on <i>Private networks</i>, and make "
+            "sure this Wi-Fi is set to <i>Private</i> in Windows Settings → Network &amp; internet.")
+        self.note.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(self.note)
+        bb = QDialogButtonBox()
+        self.toggle = bb.addButton("Turn off", QDialogButtonBox.ButtonRole.ActionRole)
+        self.toggle.clicked.connect(self._toggle)
+        bb.addButton(QDialogButtonBox.StandardButton.Close).clicked.connect(self.close)
+        lay.addWidget(bb)
+        self.is_on = False
+        self.setMinimumWidth(440)
+
+    def _toggle(self):
+        (self.turnOff if self.is_on else self.turnOn).emit()
+
+    def starting(self):
+        self.is_on = True
+        self.head.setText("Starting Wi-Fi sharing…")
+        self.qr.clear()
+        self.qr.setText("…")
+        self.links.clear()
+        self.toggle.setText("Turn off")
+
+    def ready(self, urls):
+        self.is_on = True
+        self.head.setText("Sharing is on. Open dl_pdf_tools on your phone:")
+        self.qr.setPixmap(qr_pixmap(urls[0]))
+        self.links.setText("<br>".join(f'<a href="{u}">{u}</a>' for u in urls))
+        self.toggle.setText("Turn off")
+        self.adjustSize()
+
+    def off(self, error=None):
+        self.is_on = False
+        self.head.setText(f"Couldn't start sharing: {error}" if error else "Wi-Fi sharing is off.")
+        self.qr.clear()
+        self.qr.setText("Off")
+        self.links.clear()
+        self.toggle.setText("Turn on")
+
+
 # ======================================================================== main window
 
 class MainWindow(QMainWindow):
@@ -852,6 +947,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = load_settings()
         self.doc, self.path, self.password, self.busy = None, None, None, False
+        self.wifi_proc, self.wifi_dlg, self.wifi_state = None, None, None
+        self.wifi_timer = QTimer(self)
+        self.wifi_timer.timeout.connect(self._wifi_poll)
         self.setAcceptDrops(True)
         ico = asset("icon.ico")
         if ico:
@@ -880,6 +978,13 @@ class MainWindow(QMainWindow):
         self.view.zoomChanged.connect(self._zoom_changed)
         self.status = self.statusBar()
         self.info = QLabel()
+        self.wifi_label = QPushButton()
+        self.wifi_label.setFlat(True)
+        self.wifi_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.wifi_label.setToolTip("Show the QR code and addresses")
+        self.wifi_label.clicked.connect(lambda: (self.wifi_dialog().show(), self.wifi_dialog().raise_()))
+        self.wifi_label.hide()
+        self.status.addPermanentWidget(self.wifi_label)
         self.status.addPermanentWidget(self.info)
 
         g = self.settings.get("geometry")
@@ -974,6 +1079,10 @@ class MainWindow(QMainWindow):
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
+        self.a_wifi = self._act("Share via Wi-Fi", self.wifi_clicked, None, SP.SP_DriveNetIcon,
+                                "Use these tools from your phone on the same Wi-Fi")
+        self.a_wifi.setCheckable(True)
+        tb.addAction(self.a_wifi)
         self.a_folder = self._act("", self._show_current, None, SP.SP_DirOpenIcon, "Show file in Explorer")
         tb.addAction(self.a_folder)
         self.a_about = self._act("", self.about, "F1", SP.SP_MessageBoxInformation, "About")
@@ -1179,6 +1288,80 @@ class MainWindow(QMainWindow):
         if self.path:
             show_in_folder(self.path)
 
+    # ---------------------------------------------------------------- Share via Wi-Fi
+    def wifi_clicked(self):
+        self.a_wifi.setChecked(self.wifi_proc is not None)   # the button shows the state; the dialog changes it
+        if self.wifi_proc is None:
+            self.wifi_start()
+        self.wifi_dialog().show()
+        self.wifi_dialog().raise_()
+
+    def wifi_dialog(self):
+        if self.wifi_dlg is None:
+            self.wifi_dlg = WifiDialog(self)
+            self.wifi_dlg.turnOff.connect(self.wifi_stop)
+            self.wifi_dlg.turnOn.connect(self.wifi_start)
+        return self.wifi_dlg
+
+    def wifi_start(self):
+        from .web import WIFI_STATE
+        WIFI_STATE.unlink(missing_ok=True)
+        self.wifi_proc = subprocess.Popen(_self_command("--wifi", str(os.getpid())),
+                                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.wifi_urls = None
+        self.wifi_waited = 0
+        self.a_wifi.setChecked(True)
+        self.wifi_dialog().starting()
+        self.wifi_timer.start(250)
+
+    def _wifi_poll(self):
+        from .web import WIFI_STATE
+        self.wifi_waited += 1
+        try:
+            st = json.loads(WIFI_STATE.read_text(encoding="utf-8"))
+        except Exception:
+            st = None
+        failed = None
+        if st and st.get("error"):
+            failed = st["error"]
+        elif st and st.get("urls"):
+            self.wifi_timer.stop()
+            self.wifi_urls, self.wifi_state = st["urls"], st
+            self.wifi_dialog().ready(st["urls"])
+            self.wifi_label.setText(f"📶 Sharing on Wi-Fi: {st['urls'][0]}")
+            self.wifi_label.show()
+            return
+        elif self.wifi_proc.poll() is not None:
+            failed = "The sharing server stopped unexpectedly."
+        elif self.wifi_waited > 80:   # 20 seconds
+            failed = "The sharing server didn't start in time."
+        if failed:
+            self.wifi_timer.stop()
+            self._wifi_kill()
+            self.wifi_dialog().off(failed)
+
+    def wifi_stop(self):
+        self.wifi_timer.stop()
+        st = getattr(self, "wifi_state", None)
+        if self.wifi_proc is not None and self.wifi_proc.poll() is None and st:
+            try:   # ask nicely so it can sign off the .local name; fall back to ending it
+                req = urllib.request.Request(f"http://127.0.0.1:{st['port']}/api/quit",
+                                             headers={"X-Quit": st["quit"]})
+                urllib.request.urlopen(req, timeout=2).read()
+                self.wifi_proc.wait(timeout=4)
+            except Exception:
+                pass
+        self._wifi_kill()
+        if self.wifi_dlg is not None:
+            self.wifi_dlg.off()
+
+    def _wifi_kill(self):
+        if self.wifi_proc is not None and self.wifi_proc.poll() is None:
+            self.wifi_proc.kill()
+        self.wifi_proc, self.wifi_state = None, None
+        self.a_wifi.setChecked(False)
+        self.wifi_label.hide()
+
     def about(self):
         QMessageBox.about(self, f"About {APP_NAME}",
                           f"<b>{APP_NAME}</b> {APP_VERSION}<br><br>View PDFs, split them, extract pages and "
@@ -1203,6 +1386,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, APP_NAME, "Please wait for the current job to finish.")
             e.ignore()
             return
+        if self.wifi_proc is not None:
+            self.wifi_stop()
         jobs.shutdown()
         self.settings["geometry"] = bytes(self.saveGeometry()).hex()
         save_settings(self.settings)

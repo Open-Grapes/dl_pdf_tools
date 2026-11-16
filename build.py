@@ -64,6 +64,7 @@ def pyinstaller():
            "--specpath", str(ROOT / "build")]
     for m in EXCLUDE:
         cmd += ["--exclude-module", m]
+    cmd += ["--collect-submodules", "zeroconf", "--collect-submodules", "qrcode"]
     subprocess.check_call(cmd + [str(ROOT / "run.py")])
 
 

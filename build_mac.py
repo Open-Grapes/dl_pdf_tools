@@ -193,7 +193,8 @@ def smoke_test():
     # Share via Wi-Fi starts, answers, and stops when asked.
     state = CONFIG / "wifi.json"
     state.unlink(missing_ok=True)
-    p = subprocess.Popen([str(binary), "--wifi", str(os.getpid())])
+    log = open(t / "wifi.log", "w+")
+    p = subprocess.Popen([str(binary), "--wifi", str(os.getpid())], stdout=log, stderr=subprocess.STDOUT)
     try:
         st = None
         for _ in range(40):
@@ -201,7 +202,16 @@ def smoke_test():
             if state.exists():
                 st = json.loads(state.read_text())
                 break
+        if not st:
+            log.seek(0)
+            print(log.read(), flush=True)
         assert st, "Share via Wi-Fi didn't start"
+        for _ in range(30):   # the .local name is announced in the background
+            if st.get("mdns") != "pending":
+                break
+            time.sleep(0.5)
+            st = json.loads(state.read_text())
+        print("Share via Wi-Fi .local name:", st.get("mdns"), flush=True)
         if st.get("error"):
             print(f"Share via Wi-Fi: {st['error']} (no network on this build machine; skipped)", flush=True)
         else:

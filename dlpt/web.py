@@ -415,19 +415,43 @@ def serve_wifi(parent_pid=None):
         return 1
     port = srv.server_address[1]
     suffix = "" if port == 80 else f":{port}"
-    close_mdns = _announce(ip, port)
-    urls = [f"http://{ip}{suffix}"] + ([f"http://{MDNS_HOST}.local{suffix}"] if close_mdns else [])
-    WIFI_STATE.write_text(json.dumps({"urls": urls, "port": port, "pid": os.getpid(), "quit": srv.quit_key}),
-                          encoding="utf-8")
+    state = {"urls": [f"http://{ip}{suffix}"], "port": port, "pid": os.getpid(), "quit": srv.quit_key,
+             "mdns": "pending"}
+
+    def write_state():
+        tmp = WIFI_STATE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, WIFI_STATE)
+
+    write_state()   # the IP address works right away
+    closers = []
+
+    def announce():   # the .local name follows when mDNS is ready; it can be slow or blocked on some networks
+        close = _announce(ip, port)
+        if close:
+            closers.append(close)
+            state["urls"].append(f"http://{MDNS_HOST}.local{suffix}")
+        state["mdns"] = "on" if close else "off"
+        if not stopped:
+            try:
+                write_state()
+            except OSError:
+                pass
+    stopped = []
+    threading.Thread(target=announce, daemon=True).start()
     if parent_pid:
         jobs.on_exit_of(parent_pid, srv.shutdown)
     jobs.warm_up()
     try:
         srv.serve_forever(poll_interval=0.5)
     finally:
+        stopped.append(True)
         srv.server_close()
-        if close_mdns:
-            close_mdns()
+        for close in closers:
+            try:
+                close()
+            except Exception:
+                pass
         jobs.shutdown()
         with srv.lock:
             for it in srv.items.values():

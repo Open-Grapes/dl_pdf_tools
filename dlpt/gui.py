@@ -1796,11 +1796,13 @@ class MainWindow(QMainWindow):
         if st and st.get("error"):
             failed = st["error"]
         elif st and st.get("urls"):
-            self.wifi_timer.stop()
-            self.wifi_urls, self.wifi_state = st["urls"], st
-            self.wifi_dialog().ready(st["urls"])
-            self.wifi_label.setText(f"📶 Sharing on Wi-Fi: {st['urls'][0]}")
-            self.wifi_label.show()
+            if st["urls"] != self.wifi_urls:   # the IP link comes first; the .local link follows
+                self.wifi_urls, self.wifi_state = st["urls"], st
+                self.wifi_dialog().ready(st["urls"])
+                self.wifi_label.setText(f"📶 Sharing on Wi-Fi: {st['urls'][0]}")
+                self.wifi_label.show()
+            if st.get("mdns") != "pending" or self.wifi_waited > 160:
+                self.wifi_timer.stop()
             return
         elif self.wifi_proc.poll() is not None:
             failed = "The sharing server stopped unexpectedly."

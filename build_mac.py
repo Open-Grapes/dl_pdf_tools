@@ -248,6 +248,10 @@ def update_install_test(dmg):
     sh("ditto", APP, old)
     (old / "Contents" / "Resources" / "OLD_MARKER").write_text("old copy")
     dummy = subprocess.Popen(["sleep", "3"])
+    # Stand-in for the running app. Reap it when it ends, as a real app that quits disappears entirely;
+    # otherwise it lingers as a zombie and the helper keeps waiting for it.
+    import threading
+    threading.Thread(target=dummy.wait, daemon=True).start()
     cmd, work = updater.prepare_install(dmg, dummy.pid, launch=False, loc=old)
     updater.start_helper(cmd)
     for _ in range(120):

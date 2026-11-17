@@ -51,9 +51,7 @@ release date, and that release's *What's new* notes:
 It also checks quietly once a day and shows *Update available* in the status bar. You can switch this off in the
 Check for updates window.
 
-Updates come from this repository's [Releases](../../releases), so other people only get them while the repository
-is **public**. While it's private, the check only works on a computer that is logged in to GitHub with access to
-it (through the `gh` tool or a `GH_TOKEN` variable); everyone else sees "No published version was found".
+Updates come from this repository's [Releases](../../releases). No GitHub account is needed.
 
 ## Web version (in your browser)
 

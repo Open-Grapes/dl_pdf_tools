@@ -931,11 +931,10 @@ class WifiDialog(QDialog):
         self.qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr.setMinimumSize(250, 250)
         lay.addWidget(self.qr)
-        self.links = QLabel()
-        self.links.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.links.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        self.links.setOpenExternalLinks(True)
-        self.links.setStyleSheet("font-size: 16px;")
+        self.links = QWidget()            # one row per address: the link and a Copy button
+        self.links_lay = QVBoxLayout(self.links)
+        self.links_lay.setContentsMargins(0, 4, 0, 0)
+        self.links_lay.setSpacing(6)
         lay.addWidget(self.links)
         self.mdns = _note("")
         self.mdns.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -997,7 +996,7 @@ class WifiDialog(QDialog):
         self.head.setText("Starting Wi-Fi sharing…")
         self.qr.clear()
         self.qr.setText("…")
-        self.links.clear()
+        self._set_links([])
         self.mdns.clear()
         self.count.clear()
         self.toggle.setText("Turn off")
@@ -1007,13 +1006,45 @@ class WifiDialog(QDialog):
         self.is_on = True
         self.head.setText("Sharing is on. Open dl_pdf_tools on your phone:")
         self.qr.setPixmap(qr_pixmap(urls[0]))
-        self.links.setText("<br>".join(f'<a href="{u}">{u}</a>' for u in urls))
+        self._set_links(urls)
         self.mdns.setText({"pending": "(the .local address appears in a moment)",
                            "off": "(this network blocks .local names: use the number address)"}.get(st.get("mdns"), ""))
         self.mdns.setVisible(bool(self.mdns.text()))
         self.toggle.setText("Turn off")
         self.counts(st)
         self.adjustSize()
+
+    def _set_links(self, urls):
+        """The addresses, each with a Copy button (rebuilt only when they change)."""
+        if getattr(self, "_urls", None) == list(urls):
+            return
+        self._urls = list(urls)
+        while self.links_lay.count():
+            w = self.links_lay.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        for u in urls:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            lab = QLabel(f'<a href="{u}" style="text-decoration: none;">{u}</a>')
+            lab.setStyleSheet("font-size: 16px; font-weight: 600;")
+            lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            lab.setOpenExternalLinks(True)
+            lab.setToolTip("Open in your browser")
+            h.addWidget(lab, 1)
+            b = QPushButton("Copy")
+            b.setAutoDefault(False)
+            b.setMinimumWidth(90)
+            b.setToolTip(f"Copy {u}")
+            b.clicked.connect(lambda _=False, u=u, b=b: self._copy(u, b))
+            h.addWidget(b)
+            self.links_lay.addWidget(row)
+
+    def _copy(self, url, button):
+        QApplication.clipboard().setText(url)
+        button.setText("Copied ✓")
+        QTimer.singleShot(1500, button, lambda: button.setText("Copy"))   # skipped if the row is gone
 
     def counts(self, st):
         n, d = st.get("files", 0), st.get("devices", 0)
@@ -1025,7 +1056,7 @@ class WifiDialog(QDialog):
         self.head.setText(f"Couldn't start sharing: {error}" if error else "Wi-Fi sharing is off.")
         self.qr.clear()
         self.qr.setText("Off")
-        self.links.clear()
+        self._set_links([])
         self.mdns.hide()
         self.count.clear()
         self.toggle.setText("Turn on")

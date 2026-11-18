@@ -37,11 +37,13 @@ class UpdateError(Exception):
 
 
 def parse_version(text):
-    """'v1.10.2' -> (1, 10, 2); anything unparsable sorts lowest."""
+    """'v1.10.2' -> (1, 10, 2), 'v1.6.0' -> (1, 6); anything unparsable sorts lowest."""
     parts = []
     for p in str(text).strip().lstrip("vV").split("."):
         digits = "".join(c for c in p if c.isdigit())
         parts.append(int(digits) if digits else 0)
+    while len(parts) > 1 and parts[-1] == 0:   # 1.6 == 1.6.0
+        parts.pop()
     return tuple(parts) or (0,)
 
 

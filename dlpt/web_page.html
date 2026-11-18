@@ -122,9 +122,17 @@ label.opt input { flex: none; }
   dialog .row > input[type=text] { min-width: 0; }
   footer #info { display: none; }
 }
+#gone { position: fixed; inset: 0; z-index: 999; background: var(--bg); display: grid; place-items: center;
+        text-align: center; padding: 16px; }
+#gone .ic { font-size: 44px; line-height: 1; }
+#gone h2 { margin: 10px 0 6px; }
+#gone p { color: var(--muted); max-width: 420px; margin: 0 auto 6px; }
+#gone .small { font-size: 12.5px; }
 </style>
 </head>
 <body>
+<div id="gone" hidden role="alertdialog" aria-live="assertive"><div><div class="ic" id="gone-ic"></div>
+<h2 id="gone-h"></h2><p id="gone-p"></p><p class="small" id="gone-s"></p></div></div>
 <header>
   <div class="brand"><img src="/icon.png" alt=""><span>dl_pdf_tools</span></div>
   <button id="openBtn" class="primary" title="Open a PDF (Ctrl+O)">Open PDF</button>
@@ -263,12 +271,42 @@ const store = {
 async function api(path, body) {
   const opt = { method: body === undefined ? "GET" : "POST", headers: { "X-Token": TOKEN } };
   if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
+  if (GONE) throw new Error($("gone-h").textContent);
   const r = await fetch(path, opt);
   let data = {};
   try { data = await r.json(); } catch {}
-  if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
+  if (!r.ok) { seeGone(data); throw new Error(data.error || `Request failed (${r.status})`); }
   return data;
 }
+
+// ------------------------------------------------------------------ Wi-Fi: the computer ended sharing, or blocked this device
+let LAN = false, PC = "the computer", GONE = null, misses = 0, goneTimer = 0;
+function gone(kind) {
+  if (GONE === "blocked" && kind !== "blocked") return;
+  GONE = kind;
+  const T = {
+    off: ["⏻", "Wi-Fi sharing has ended", `${PC} stopped sharing, so this page no longer works.`,
+          "If sharing is turned back on, this page reconnects by itself."],
+    lost: ["📶", "Can't reach the computer", "Wi-Fi sharing was turned off, or this device left the Wi-Fi.",
+           "Trying again…"],
+    blocked: ["⛔", "Access ended", "The owner of this computer has ended your access to dl_pdf_tools.", ""]}[kind];
+  [$("gone-ic").textContent, $("gone-h").textContent, $("gone-p").textContent, $("gone-s").textContent] = T;
+  document.querySelectorAll("dialog[open]").forEach((d) => d.close());
+  $("gone").hidden = false;
+  clearTimeout(goneTimer);
+  if (kind !== "blocked") goneTimer = setTimeout(retry, 5000);
+}
+async function retry() {          // back on (or back on the Wi-Fi): start fresh
+  try {
+    const r = await fetch("/api/info", { cache: "no-store" });
+    if (r.ok) return location.reload();
+    const j = await r.json().catch(() => ({}));
+    if (j.blocked) return gone("blocked");
+    if (j.ended) gone("off");
+  } catch {}
+  goneTimer = setTimeout(retry, 5000);
+}
+function seeGone(j) { if (j && j.blocked) gone("blocked"); else if (j && j.ended) gone("off"); }
 function human(n) {
   const u = ["B", "KB", "MB", "GB"]; let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
@@ -353,9 +391,11 @@ function upload(file) {
     };
     x.onload = () => {
       let data = {}; try { data = JSON.parse(x.responseText); } catch {}
+      if (x.status !== 200) seeGone(data);
       x.status === 200 ? resolve(data) : reject(new Error(data.error || `Upload failed (${x.status})`));
     };
-    x.onerror = () => reject(new Error("Upload failed. Is the dl_pdf_tools web server still running?"));
+    x.onerror = () => reject(new Error(LAN ? "Upload failed. Is Wi-Fi sharing still on?"
+                                          : "Upload failed. Is the dl_pdf_tools web server still running?"));
     x.send(file);
   });
 }
@@ -581,7 +621,18 @@ window.addEventListener("keydown", (e) => {
   else if (mod && e.key === "0") { e.preventDefault(); fit = "width"; applyZoom(); }
   else if (e.target.tagName !== "INPUT" && (e.key === "Home" || e.key === "End")) { e.preventDefault(); goTo(e.key === "Home" ? 0 : 1e9); }
 });
-setInterval(() => api("/api/heartbeat").catch(() => status("The dl_pdf_tools web server has stopped. Start it again with the (Web) launcher.")), 15000);
+// Keep the local server alive while this page is open; on Wi-Fi, also notice quickly when sharing ends.
+async function heartbeat() {
+  if (GONE) return;
+  try {
+    const r = await fetch(`/api/heartbeat?t=${encodeURIComponent(TOKEN)}`, { cache: "no-store" });
+    misses = 0;
+    if (!r.ok) seeGone(await r.json().catch(() => null));
+  } catch {
+    if (LAN) { if (++misses >= 2) gone("lost"); }
+    else status("The dl_pdf_tools web server has stopped. Start it again with the (Web) launcher.");
+  }
+}
 window.addEventListener("pagehide", () => {
   if (doc) navigator.sendBeacon(`/api/forget?t=${encodeURIComponent(TOKEN)}`,
     new Blob([JSON.stringify({ ids: [doc.id] })], { type: "application/json" }));
@@ -818,8 +869,12 @@ setTheme(store.get("theme", "system"));
 
 // ------------------------------------------------------------------ start
 document.querySelectorAll(".needs-doc").forEach((b) => (b.disabled = true));
-api("/api/info").then((i) => { presets = i.presets; $("info").textContent = `v${i.version}`; })
-  .catch(() => status("Can't reach the dl_pdf_tools web server. Start it with the (Web) launcher."));
+api("/api/info").then((i) => {
+  presets = i.presets; $("info").textContent = `v${i.version}`;
+  LAN = !!i.lan; PC = i.pc || PC;
+  if (LAN) $("info").textContent += ` · shared over Wi-Fi from ${PC}`;
+  setInterval(heartbeat, LAN ? 4000 : 15000);
+}).catch(() => { if (!GONE) status("Can't reach the dl_pdf_tools web server. Start it with the (Web) launcher."); });
 </script>
 </body>
 </html>

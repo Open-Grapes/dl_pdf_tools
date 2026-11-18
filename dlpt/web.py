@@ -1,13 +1,16 @@
-"""Local web version: a small server on 127.0.0.1 that shows the PDF tools in the browser.
+"""Browser versions of the app.
 
-PDFs opened on the page are uploaded to this computer's own server (nothing leaves the PC), viewed,
-split, extracted or compressed with the same engine as the window, and results are offered as downloads.
+1. This computer only: `dl_pdf_tools (Web)` launcher (`--web`). A server on 127.0.0.1 with a random
+   per-session token, so other web pages can't use it. Uploads are temporary and deleted when it stops
+   (a minute after the last page closes).
 
-  dl_pdf_tools.exe --web     start (or reuse) the server and open the page
+2. Share via Wi-Fi: started from the window (`--wifi PID`, its own process). Phones and laptops on the same
+   network open http://192.168.x.x (or http://dl-pdf-tools.local), open a PDF and split, extract or compress
+   it here; they download the results. No password, but the Host header is checked (other websites can't reach
+   it), each device only sees its own files, blocked devices are turned away, every visit is logged, and
+   uploads are kept on this computer (one folder each) until you delete them in Admin.
 
-Only this computer can reach it (bound to 127.0.0.1), and every request needs a random per-session token,
-so other web pages open in the browser can't use it. The server stops itself a minute after the last
-page is closed.
+PDFs never leave this computer's network: the page talks only to this computer.
 """
 
 import json
@@ -28,19 +31,26 @@ from pathlib import Path
 import pymupdf
 
 from . import engine, jobs
-from .common import APP_NAME, APP_VERSION, CONFIG_DIR, BUNDLE_DIR, asset
+from .common import APP_NAME, APP_VERSION, CONFIG_DIR, BUNDLE_DIR, asset, human_size
 
 PREFERRED_PORT = 8775
-IDLE_EXIT = 60          # seconds without any page open before the server stops
+IDLE_EXIT = 60          # seconds without any page open before the local server stops
 STATE = CONFIG_DIR / "web.json"
 WORK = CONFIG_DIR / "web"
 MAX_UPLOAD = 4 * 1024 ** 3
 
 # Share via Wi-Fi: the same page, reachable from a phone on the same network.
 WIFI_STATE = CONFIG_DIR / "wifi.json"     # written once the server is listening (or with an "error")
-WIFI_WORK = CONFIG_DIR / "wifi"
+WIFI_ENDING = CONFIG_DIR / "wifi_ending"  # a server that was turned off and is still saying "sharing has ended"
 WIFI_PORTS = (80, PREFERRED_PORT, 0)      # port 80 gives short addresses like http://192.168.0.20
 MDNS_HOST = "dl-pdf-tools"                # announced as http://dl-pdf-tools.local
+LINGER = 8          # seconds an address keeps saying "sharing has ended" after Turn off (pages check every 4 s)
+BLOCKED_MSG = f"The owner of this computer has ended your access to {APP_NAME}."
+BLOCKED_PAGE = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+                f"<title>{APP_NAME}</title><body style='font:17px system-ui,sans-serif;display:grid;place-items:center;"
+                "min-height:90vh;margin:0;padding:16px;text-align:center;background:#f3f4f6;color:#1d2330'>"
+                "<div><div style='font-size:42px'>&#9940;</div><h2>Access ended</h2><p>" + BLOCKED_MSG + "</p></div>")
+_SEEN = {}
 
 
 def _page_file():
@@ -52,6 +62,9 @@ def _page_file():
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    # On Windows SO_REUSEADDR lets a second copy grab the same port, and phones then reach either one at
+    # random. Claim the port exclusively there instead.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(self, port, token, work=WORK, wifi_hosts=None):
         """wifi_hosts: None for the local-only version; for Share via Wi-Fi, the host names the phone may
@@ -59,8 +72,11 @@ class Server(ThreadingHTTPServer):
         super().__init__(("0.0.0.0" if wifi_hosts else "127.0.0.1", port), Handler)
         self.token, self.work, self.wifi_hosts = token, work, wifi_hosts
         self.quit_key = secrets.token_urlsafe(24)
+        self.on_change = None     # Wi-Fi: called after an upload (the window shows the count)
 
     def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         # HTTPServer.server_bind() looks up the machine's network name (socket.getfqdn), which can hang
         # for a long time on Macs whose name doesn't resolve. That name is never used here, so skip it.
         socketserver.TCPServer.server_bind(self)
@@ -68,8 +84,50 @@ class Server(ThreadingHTTPServer):
         self.last_seen = time.time()
         self.lock = threading.Lock()
         self.render_lock = threading.Lock()   # MuPDF is not thread-safe: one render at a time in this process
-        self.items = {}      # id -> {"name", "src", "password", "doc"}
-        self.results = {}    # id -> {"path", "name"}
+        self.items = {}      # id -> {"id", "name", "src", "password", "doc", "ip"}
+        self.results = {}    # id -> {"path", "name", "ip"}
+        self.uploads = []    # Wi-Fi: (ip) of every PDF opened since sharing started
+        self.closed = False  # Wi-Fi sharing turned off: answer "ended", then hang up
+        self.conns = set()   # open browser connections (kept alive between requests)
+        self.conns_lock = threading.Lock()
+
+    def handle_error(self, request, client_address):
+        """A browser that hangs up mid-answer (closed tab, phone left the Wi-Fi) is normal: no traceback."""
+        import sys
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+    def hang_up(self):
+        """Turn off: cut every open browser connection, so pages notice right away."""
+        self.closed = True
+        with self.conns_lock:
+            conns = list(self.conns)
+        for c in conns:
+            try:
+                c.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def forget(self, match):
+        """Close and drop the open PDFs for which match(item) is true (their files stay on Wi-Fi)."""
+        with self.lock:
+            gone = [self.items.pop(i) for i, it in list(self.items.items()) if match(it)]
+            for rid in [r for r, res in self.results.items() if res.get("ip") in {it.get("ip") for it in gone}
+                        and match(res)]:
+                self.results.pop(rid, None)
+        for it in gone:
+            with self.render_lock:
+                try:
+                    it["doc"].close()
+                except Exception:
+                    pass
+        return gone
+
+    def counts(self):
+        """(PDFs opened since sharing started, devices that sent them)."""
+        with self.lock:
+            return len(self.uploads), len(set(self.uploads))
 
 
 def _safe_name(name):
@@ -89,18 +147,32 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def setup(self):
+        super().setup()
+        with self.server.conns_lock:
+            self.server.conns.add(self.connection)
+
+    def finish(self):
+        with self.server.conns_lock:
+            self.server.conns.discard(self.connection)
+        try:
+            super().finish()
+        except OSError:
+            pass
+
     # ---------------------------------------------------------------- helpers
     def _send(self, code, body=b"", ctype="application/json", headers=None):
         if isinstance(body, (dict, list)):
             body = json.dumps(body).encode("utf-8")
         elif isinstance(body, str):
             body = body.encode("utf-8")
+        headers = dict(headers or {})
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", (headers or {}).pop("Cache-Control", "no-store"))
+        self.send_header("Cache-Control", headers.pop("Cache-Control", "no-store"))
         self.send_header("X-Content-Type-Options", "nosniff")
-        for k, v in (headers or {}).items():
+        for k, v in headers.items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
@@ -109,15 +181,55 @@ class Handler(BaseHTTPRequestHandler):
     def _query(self):
         return {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
 
+    @property
+    def wifi(self):
+        return bool(self.server.wifi_hosts)
+
+    def _ip(self):
+        return self.client_address[0]
+
     def _allowed(self):
         """Same-machine Host header (blocks DNS rebinding) and the session token."""
         host = (self.headers.get("Host") or "").split(":")[0].lower()
-        if self.server.wifi_hosts:   # the Host check still blocks other websites (DNS rebinding)
+        if self.wifi:   # the Host check still blocks other websites (DNS rebinding)
             return host in self.server.wifi_hosts
         if host not in ("127.0.0.1", "localhost"):
             return False
         tok = self.headers.get("X-Token") or self._query().get("t", "")
         return secrets.compare_digest(tok, self.server.token)
+
+    def _gate(self, path):
+        """Wi-Fi: sharing turned off, or this device blocked. Say so (the page shows a notice) and stop."""
+        if not self.wifi:
+            return False
+        from .wifi_store import is_blocked
+        if self.server.closed:
+            self.close_connection = True
+            self._send(503, {"error": "Wi-Fi sharing was turned off on the computer.", "ended": True},
+                       headers={"Connection": "close"})
+            return True
+        ip = self._ip()
+        if is_blocked(ip):
+            self.close_connection = True
+            if time.time() - _SEEN.get("blocked " + ip, 0) > 600:
+                self._log("Tried to connect (blocked)")
+                _SEEN["blocked " + ip] = time.time()
+            if path.startswith("/api/"):
+                self._send(403, {"error": BLOCKED_MSG, "blocked": True}, headers={"Connection": "close"})
+            else:
+                self._send(403, BLOCKED_PAGE, "text/html; charset=utf-8", {"Connection": "close"})
+            return True
+        return False
+
+    def _log(self, action, details=""):
+        if self.wifi:
+            from .wifi_store import log_event
+            log_event(self._ip(), self.headers.get("User-Agent", ""), action, details)
+
+    def _admin_ok(self):
+        """The desktop app talking to its own sharing server (same PC + its secret)."""
+        return self.client_address[0] == "127.0.0.1" and self.wifi and \
+            secrets.compare_digest(self.headers.get("X-Quit", ""), self.server.quit_key)
 
     def _json(self):
         try:
@@ -128,7 +240,8 @@ class Handler(BaseHTTPRequestHandler):
     def _item(self, iid):
         with self.server.lock:
             it = self.server.items.get(iid or "")
-        if not it:
+        # On Wi-Fi a device only gets its own files.
+        if not it or (self.wifi and it.get("ip") != self._ip()):
             raise BadRequest("That PDF is no longer open here. Open it again.")
         return it
 
@@ -140,35 +253,60 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/icon.png", "/favicon.ico"):
             ico = asset("icon.png")
             return self._send(200, ico.read_bytes() if ico else b"", "image/png", {"Cache-Control": "max-age=86400"})
+        if path == "/api/admin":   # before the gate: it works while "ended" too
+            return self._admin()
         if not self._allowed():
-            return self._send(403, f"Open the page with the {APP_NAME} (Web) launcher.", "text/plain")
+            return self._send(403, ("Open the address shown in the Share via Wi-Fi window." if self.wifi else
+                                    f"Open the page with the {APP_NAME} (Web) launcher."), "text/plain")
+        if self._gate(path):
+            return
         self.server.last_seen = time.time()
         try:
             if path in ("/", "/index.html"):
+                if self.wifi and time.time() - _SEEN.get(self._ip(), 0) > 600:   # once per 10 min per device
+                    self._log("Opened the page")
+                _SEEN[self._ip()] = time.time()
                 return self._send(200, _page_file().read_bytes(), "text/html; charset=utf-8",
                                   {"Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                                                               "script-src 'self' 'unsafe-inline'; img-src 'self' data:"})
             if path == "/api/info":
-                return self._send(200, {"app": APP_NAME, "version": APP_VERSION, "presets": engine.PRESETS})
+                return self._send(200, {"app": APP_NAME, "version": APP_VERSION, "presets": engine.PRESETS,
+                                        "lan": self.wifi, "pc": socket.gethostname()})
             if path == "/api/heartbeat":
                 return self._send(200, {"ok": True})
-            if path == "/api/quit":   # the desktop app turning Share via Wi-Fi off (same PC + its secret)
-                if self.client_address[0] == "127.0.0.1" and self.server.wifi_hosts and \
-                        secrets.compare_digest(self.headers.get("X-Quit", ""), self.server.quit_key):
-                    threading.Thread(target=self.server.shutdown, daemon=True).start()
-                    return self._send(200, {"ok": True})
-                return self._send(403, {"error": "forbidden"})
             if path == "/api/page":
                 return self._render()
             if path.startswith("/api/download/"):
                 with self.server.lock:
                     r = self.server.results.get(path.rsplit("/", 1)[-1])
-                if not r or not Path(r["path"]).is_file():
+                if not r or (self.wifi and r.get("ip") != self._ip()) or not Path(r["path"]).is_file():
                     return self._send(404, {"error": "That download has expired. Run the tool again."})
+                self._log("Downloaded", r["name"])
                 return self._send_file(Path(r["path"]), r["name"])
         except BadRequest as e:
             return self._send(400, {"error": str(e)})
         return self._send(404, {"error": "not found"})
+
+    def _admin(self):
+        """Commands from the desktop app: end sharing, close every PDF (before Delete all), or drop a blocked
+        device's PDFs."""
+        if not self._admin_ok():
+            return self._send(403, {"error": "forbidden"})
+        q = self._query()
+        do = q.get("do", "")
+        if do == "quit":   # answer first: ending sharing cuts every open connection, this one included
+            self.close_connection = True
+            self._send(200, {"ok": True}, headers={"Connection": "close"})
+            threading.Thread(target=end_sharing, args=(self.server,), daemon=True).start()
+            return
+        if do == "purge":
+            self.server.forget(lambda it: True)
+        elif do == "kick":
+            ip = q.get("ip", "")
+            self.server.forget(lambda it: it.get("ip") == ip)
+        else:
+            return self._send(400, {"error": "unknown"})
+        return self._send(200, {"ok": True})
 
     def _render(self):
         q = self._query()
@@ -179,7 +317,7 @@ class Handler(BaseHTTPRequestHandler):
             raise BadRequest("bad page") from None
         with self.server.render_lock:
             doc = it["doc"]
-            if not 0 <= n < doc.page_count:
+            if doc.is_closed or not 0 <= n < doc.page_count:
                 raise BadRequest("bad page")
             page = doc[n]
             pix = page.get_pixmap(matrix=pymupdf.Matrix(w / page.rect.width, w / page.rect.width), alpha=False)
@@ -203,6 +341,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if not self._allowed():
             return self._send(403, {"error": "forbidden"})
+        if self._gate(path):
+            return
         self.server.last_seen = time.time()
         routes = {"/api/upload": self._upload, "/api/unlock": self._unlock, "/api/estimate": self._estimate,
                   "/api/split": self._split, "/api/extract": self._extract, "/api/compress": self._compress,
@@ -223,8 +363,12 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0 or length > MAX_UPLOAD:
             raise BadRequest("The file is empty or too large.")
         iid = secrets.token_hex(8)
-        d = self.server.work / iid
-        d.mkdir(parents=True, exist_ok=True)
+        if self.wifi:
+            from .wifi_store import new_folder
+            d = new_folder(iid[:6], self._ip(), name)
+        else:
+            d = self.server.work / iid
+            d.mkdir(parents=True, exist_ok=True)
         src = d / name
         left = length
         with open(src, "wb") as fh:
@@ -250,9 +394,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             shutil.rmtree(d, ignore_errors=True)
             raise BadRequest(f"Couldn't open {name}: {e}") from None
-        it = {"id": iid, "name": name, "src": str(src), "password": None, "doc": doc}
+        it = {"id": iid, "name": name, "src": str(src), "password": None, "doc": doc, "ip": self._ip()}
         with self.server.lock:
             self.server.items[iid] = it
+            if self.wifi:
+                self.server.uploads.append(self._ip())
+        if self.wifi:
+            self._log("Opened PDF", f"{name} · {human_size(length)}")
+            if self.server.on_change:
+                self.server.on_change()
         return self._info(it)
 
     def _info(self, it):
@@ -306,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
                 for f in files:
                     z.write(f, f.name)
         with self.server.lock:
-            self.server.results[rid] = {"path": str(path), "name": name}
+            self.server.results[rid] = {"path": str(path), "name": name, "ip": it.get("ip")}
         return {"url": f"/api/download/{rid}", "name": name, "files": len(files), "size": path.stat().st_size}
 
     def _outdir(self, it):
@@ -329,6 +479,7 @@ class Handler(BaseHTTPRequestHandler):
             groups = engine.parse_groups(req.get("ranges", ""), count)
         out = self._outdir(it)
         files = jobs.run(engine.split_groups, it["src"], groups, str(out), it["password"])
+        self._log("Split", f"{it['name']} → {len(files)} files")
         return self._result(it, files, f"{Path(it['name']).stem}_split.zip")
 
     def _extract(self):
@@ -338,12 +489,15 @@ class Handler(BaseHTTPRequestHandler):
         comp = self._opts(req["compress"]) if req.get("compress") else None
         out = self._outdir(it)
         stem = Path(it["name"]).stem
+        what = f"{it['name']} · pages {engine.format_ranges(pages)}" + (" · reduced size" if comp else "")
         if req.get("separate"):
             files = jobs.run(engine.extract_each, it["src"], pages, str(out), it["password"], compress=comp)
+            self._log("Extracted pages (separate files)", what)
             return self._result(it, files, f"{stem}_pages.zip")
         label = engine.format_ranges(pages).replace(", ", "_").replace(" ", "")
         label = label if len(label) <= 40 else label[:40] + "_etc"
         f = jobs.run(engine.extract, it["src"], pages, str(out / f"{stem}_pages_{label}.pdf"), it["password"], comp)
+        self._log("Extracted pages", what)
         return self._result(it, [f], "")
 
     def _compress(self):
@@ -352,17 +506,18 @@ class Handler(BaseHTTPRequestHandler):
         out = self._outdir(it) / f"{Path(it['name']).stem}_compressed.pdf"
         r = jobs.run(engine.compress, it["src"], str(out), password=it["password"], **self._opts(req.get("opts")))
         res = {"before": r["before"], "after": r["after"], "written": r["written"]}
+        self._log("Reduced size", f"{it['name']} · {human_size(r['before'])} → {human_size(r['after'])}"
+                  if r["written"] else f"{it['name']} · couldn't be made smaller")
         if r["written"]:
             res.update(self._result(it, [r["path"]], ""))
         return res
 
     def _forget(self):
-        for iid in self._json().get("ids", []):
-            with self.server.lock:
-                it = self.server.items.pop(iid, None)
-            if it:
-                with self.server.render_lock:
-                    it["doc"].close()
+        ids = set(self._json().get("ids", []))
+        ip = self._ip()
+        gone = self.server.forget(lambda it: it.get("id") in ids and (not self.wifi or it.get("ip") == ip))
+        if not self.wifi:   # on Wi-Fi the files stay in the uploads folder until you delete them (Admin)
+            for it in gone:
                 shutil.rmtree(Path(it["src"]).parent, ignore_errors=True)
         return {"ok": True}
 
@@ -400,6 +555,23 @@ def _announce(ip, port):
         return None   # the IP address link still works
 
 
+_ending_lock = threading.Lock()
+
+
+def end_sharing(srv, linger=LINGER):
+    """Turn off: open pages are told "sharing has ended" for a few seconds, then the server stops."""
+    with _ending_lock:
+        if srv.closed:
+            return
+        srv.hang_up()
+    try:
+        WIFI_ENDING.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
+    time.sleep(linger)
+    srv.shutdown()
+
+
 def serve_wifi(parent_pid=None):
     """Run the page for phones on this network until the desktop app (parent_pid) turns it off or quits.
 
@@ -410,7 +582,7 @@ def serve_wifi(parent_pid=None):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     crash_log = open(CONFIG_DIR / "wifi.log", "w", encoding="utf-8")
     faulthandler.enable(crash_log)
-    faulthandler.dump_traceback_later(15, file=crash_log)   # if starting up ever hangs, record where
+    faulthandler.dump_traceback_later(30, file=crash_log)   # if starting up ever hangs, record where
     try:
         return _serve_wifi(parent_pid)
     except BaseException as e:
@@ -423,19 +595,33 @@ def serve_wifi(parent_pid=None):
         return 1
 
 
-def _serve_wifi(parent_pid):
+def _wait_for_previous():
+    """Turned straight back on: let the previous server (still saying "sharing has ended") free its port, so
+    the address stays the same."""
+    t = time.time()
+    while WIFI_ENDING.exists() and time.time() - t < LINGER + 3:
+        try:
+            if time.time() - WIFI_ENDING.stat().st_mtime > LINGER + 10:   # left over from a crash
+                break
+        except OSError:
+            break
+        time.sleep(0.25)
+
+
+def _serve_wifi(parent_pid, ports=WIFI_PORTS):
+    from .wifi_store import WORK as UPLOADS
     WIFI_STATE.unlink(missing_ok=True)
     ip = lan_ip()
     if not ip:
         WIFI_STATE.write_text(json.dumps({"error": "This PC isn't connected to a network."}), encoding="utf-8")
         return 1
-    shutil.rmtree(WIFI_WORK, ignore_errors=True)
-    WIFI_WORK.mkdir(parents=True, exist_ok=True)
+    UPLOADS.mkdir(parents=True, exist_ok=True)        # earlier uploads are kept until you delete them
+    _wait_for_previous()
     hosts = {ip, f"{MDNS_HOST}.local", f"{socket.gethostname().lower()}.local", "127.0.0.1", "localhost"}
     srv = None
-    for port in WIFI_PORTS:
+    for port in ports:
         try:
-            srv = Server(port, "", WIFI_WORK, hosts)
+            srv = Server(port, "", UPLOADS, hosts)
             break
         except OSError:
             continue
@@ -445,13 +631,23 @@ def _serve_wifi(parent_pid):
     port = srv.server_address[1]
     suffix = "" if port == 80 else f":{port}"
     state = {"urls": [f"http://{ip}{suffix}"], "port": port, "pid": os.getpid(), "quit": srv.quit_key,
-             "mdns": "pending"}
+             "mdns": "pending", "files": 0, "devices": 0}
+    state_lock = threading.Lock()
+    stopped = []
 
     def write_state():
-        tmp = WIFI_STATE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
-        os.replace(tmp, WIFI_STATE)
+        if stopped:
+            return
+        with state_lock:
+            state["files"], state["devices"] = srv.counts()
+            tmp = WIFI_STATE.with_suffix(".tmp")
+            try:
+                tmp.write_text(json.dumps(state), encoding="utf-8")
+                os.replace(tmp, WIFI_STATE)
+            except OSError:
+                pass
 
+    srv.on_change = write_state
     write_state()   # the IP address works right away
     import faulthandler
     faulthandler.cancel_dump_traceback_later()   # started fine
@@ -463,15 +659,10 @@ def _serve_wifi(parent_pid):
             closers.append(close)
             state["urls"].append(f"http://{MDNS_HOST}.local{suffix}")
         state["mdns"] = "on" if close else "off"
-        if not stopped:
-            try:
-                write_state()
-            except OSError:
-                pass
-    stopped = []
+        write_state()
     threading.Thread(target=announce, daemon=True).start()
-    if parent_pid:
-        jobs.on_exit_of(parent_pid, srv.shutdown)
+    if parent_pid:   # the app closed (or crashed): end sharing the same way as Turn off
+        jobs.on_exit_of(parent_pid, lambda: end_sharing(srv))
     jobs.warm_up()
     try:
         srv.serve_forever(poll_interval=0.5)
@@ -484,14 +675,9 @@ def _serve_wifi(parent_pid):
             except Exception:
                 pass
         jobs.shutdown()
-        with srv.lock:
-            for it in srv.items.values():
-                try:
-                    it["doc"].close()
-                except Exception:
-                    pass
-        shutil.rmtree(WIFI_WORK, ignore_errors=True)
+        srv.forget(lambda it: True)
         WIFI_STATE.unlink(missing_ok=True)
+        WIFI_ENDING.unlink(missing_ok=True)
     return 0
 
 
@@ -549,12 +735,7 @@ def serve(open_browser=True):
     finally:
         srv.server_close()
         jobs.shutdown()
-        with srv.lock:
-            for it in srv.items.values():
-                try:
-                    it["doc"].close()
-                except Exception:
-                    pass
+        srv.forget(lambda it: True)
         shutil.rmtree(WORK, ignore_errors=True)
         try:
             STATE.unlink()

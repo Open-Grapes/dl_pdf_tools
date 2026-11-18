@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from pathlib import Path
@@ -21,16 +22,17 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog,
                                QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QStyle,
-                               QTextBrowser, QToolBar, QToolButton,
+                               QTableWidget, QTableWidgetItem, QTextBrowser, QToolBar, QToolButton,
                                QVBoxLayout, QWidget)
 
-from . import engine, jobs, updater
+from . import engine, jobs, updater, wifi_store
 from .common import APP_NAME, APP_VERSION, asset, human_size, load_settings, save_settings
 
 PT = 96 / 72          # screen pixels per PDF point at 100 %
 GAP, MARGIN = 14, 18  # space between pages / around them
 ZOOMS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 6.0]
 THUMB_W = 118
+WARN_COLOR = "#d18616"   # reminders (readable in light and dark)
 
 
 def render(page, scale, dpr=1.0):
@@ -910,12 +912,14 @@ def qr_pixmap(text, size=240):
 
 
 class WifiDialog(QDialog):
-    """Shows how to open the tools on a phone: a QR code and the addresses, plus the on/off switch."""
+    """Shows how to open the tools on a phone: a QR code and the addresses, the on/off switch, how many PDFs
+    people opened, and a reminder while their uploads are stored on this computer."""
     turnOff = Signal()
     turnOn = Signal()
 
-    def __init__(self, parent):
-        super().__init__(parent)
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
         self.setWindowTitle("Share via Wi-Fi")
         self.setModal(False)
         lay = QVBoxLayout(self)
@@ -933,20 +937,57 @@ class WifiDialog(QDialog):
         self.links.setOpenExternalLinks(True)
         self.links.setStyleSheet("font-size: 16px;")
         lay.addWidget(self.links)
+        self.mdns = _note("")
+        self.mdns.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.mdns)
+        tip = ("<b>Phone can't connect?</b> The first time, macOS asks whether to accept incoming connections for "
+               "dl_pdf_tools: click <i>Allow</i>." if sys.platform == "darwin" else
+               "<b>Phone can't connect?</b> When Windows asks, allow dl_pdf_tools on <i>Private networks</i>, and "
+               "make sure this Wi-Fi is set to <i>Private</i> in Windows Settings → Network &amp; internet.")
         self.note = _note(
-            "Your phone must be on the same Wi-Fi as this PC. Point the phone's camera at the code, or type an "
-            "address into Safari or Chrome. Sharing stays on until you turn it off or close dl_pdf_tools.<br><br>"
-            "<b>Phone can't connect?</b> When Windows asks, allow dl_pdf_tools on <i>Private networks</i>, and make "
-            "sure this Wi-Fi is set to <i>Private</i> in Windows Settings → Network &amp; internet.")
+            "Phones, tablets and laptops on the same Wi-Fi as this computer can open one of these addresses (or "
+            "scan the code with the phone's camera). They open a PDF; this computer splits it, extracts pages or "
+            "reduces its size, and they download the result. Each device only sees its own files.<br><br>"
+            "Keep this computer on with dl_pdf_tools open. There's no password: anyone on this Wi-Fi who knows "
+            "the address can use it while sharing is on. Their PDFs are kept on this computer until you delete "
+            "them (Admin…).<br><br>" + tip)
         self.note.setTextFormat(Qt.TextFormat.RichText)
         lay.addWidget(self.note)
-        bb = QDialogButtonBox()
-        self.toggle = bb.addButton("Turn off", QDialogButtonBox.ButtonRole.ActionRole)
+        self.count = _note("")
+        lay.addWidget(self.count)
+        self.store_row = QWidget()
+        sl = QVBoxLayout(self.store_row)
+        sl.setContentsMargins(0, 4, 0, 0)
+        self.store_lbl = QLabel()
+        self.store_lbl.setWordWrap(True)
+        self.store_lbl.setStyleSheet(f"color: {WARN_COLOR};")
+        sl.addWidget(self.store_lbl)
+        sr = QHBoxLayout()
+        b = QPushButton("Open folder")
+        b.clicked.connect(win.wifi_open_folder)
+        sr.addWidget(b)
+        b = QPushButton("Delete all…")
+        b.clicked.connect(lambda: win.wifi_delete_all(self))
+        sr.addWidget(b)
+        sr.addStretch(1)
+        sl.addLayout(sr)
+        self.store_row.hide()
+        lay.addWidget(self.store_row)
+        row = QHBoxLayout()
+        self.toggle = QPushButton("Turn off")
+        self.toggle.setMinimumWidth(110)
         self.toggle.clicked.connect(self._toggle)
-        bb.addButton(QDialogButtonBox.StandardButton.Close).clicked.connect(self.close)
-        lay.addWidget(bb)
+        row.addWidget(self.toggle)
+        row.addStretch(1)
+        b = QPushButton("Admin…")
+        b.clicked.connect(win.wifi_admin)
+        row.addWidget(b)
+        b = QPushButton("Close")
+        b.clicked.connect(self.close)
+        row.addWidget(b)
+        lay.addLayout(row)
         self.is_on = False
-        self.setMinimumWidth(440)
+        self.setFixedWidth(480)
 
     def _toggle(self):
         (self.turnOff if self.is_on else self.turnOn).emit()
@@ -957,15 +998,27 @@ class WifiDialog(QDialog):
         self.qr.clear()
         self.qr.setText("…")
         self.links.clear()
+        self.mdns.clear()
+        self.count.clear()
         self.toggle.setText("Turn off")
 
-    def ready(self, urls):
+    def ready(self, st):
+        urls = st["urls"]
         self.is_on = True
         self.head.setText("Sharing is on. Open dl_pdf_tools on your phone:")
         self.qr.setPixmap(qr_pixmap(urls[0]))
         self.links.setText("<br>".join(f'<a href="{u}">{u}</a>' for u in urls))
+        self.mdns.setText({"pending": "(the .local address appears in a moment)",
+                           "off": "(this network blocks .local names: use the number address)"}.get(st.get("mdns"), ""))
+        self.mdns.setVisible(bool(self.mdns.text()))
         self.toggle.setText("Turn off")
+        self.counts(st)
         self.adjustSize()
+
+    def counts(self, st):
+        n, d = st.get("files", 0), st.get("devices", 0)
+        self.count.setText(f"{n} PDF{'s' * (n != 1)} opened from {d} device{'s' * (d != 1)} since sharing started."
+                           if n else "No PDFs opened yet.")
 
     def off(self, error=None):
         self.is_on = False
@@ -973,7 +1026,235 @@ class WifiDialog(QDialog):
         self.qr.clear()
         self.qr.setText("Off")
         self.links.clear()
+        self.mdns.hide()
+        self.count.clear()
         self.toggle.setText("Turn on")
+
+    def stored(self, n, size):
+        """Reminder: uploads from Wi-Fi users still on this computer."""
+        if n:
+            self.store_lbl.setText(f"⚠  {n} upload{'s' * (n != 1)} ({human_size(size)}) stored on this computer. "
+                                   "Delete them when you no longer need them.")
+        if self.store_row.isVisible() != bool(n):
+            self.store_row.setVisible(bool(n))
+            self.adjustSize()
+
+
+class WifiAdminDialog(QDialog):
+    """The uploads people left on this computer (open the folder / delete all), the activity log, and
+    blocking devices."""
+    COLS = wifi_store.COLS
+    WIDTHS = (88, 70, 110, 150, 130, 200, 170, 360)
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle("Wi-Fi admin")
+        self.setModal(False)
+        self.resize(1180, 640)
+        lay = QVBoxLayout(self)
+        t = QLabel("Stored uploads")
+        t.setStyleSheet("font-size: 15px; font-weight: 600;")
+        lay.addWidget(t)
+        self.warn = QLabel()
+        self.warn.setWordWrap(True)
+        lay.addWidget(self.warn)
+        r = QHBoxLayout()
+        where = _note(str(wifi_store.WORK))
+        where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        r.addWidget(where, 1)
+        b = QPushButton("Open folder")
+        b.clicked.connect(win.wifi_open_folder)
+        r.addWidget(b)
+        b = QPushButton("Delete all uploads…")
+        b.clicked.connect(self._delete)
+        r.addWidget(b)
+        lay.addLayout(r)
+        lay.addWidget(_note(
+            "Each PDF is kept in its own folder named by date, time and the sender's IP address (its results are in "
+            "the \"out-…\" folders next to it), even after sharing is turned off or the app is closed, until you "
+            "press Delete all."))
+        line = QWidget()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background: palette(mid);")
+        lay.addSpacing(6)
+        lay.addWidget(line)
+        lay.addSpacing(6)
+        hr = QHBoxLayout()
+        t = QLabel("Activity log")
+        t.setStyleSheet("font-size: 15px; font-weight: 600;")
+        hr.addWidget(t)
+        hr.addStretch(1)
+        hr.addWidget(QLabel("Filter"))
+        self.filter = QLineEdit()
+        self.filter.setFixedWidth(220)
+        self.filter.setClearButtonEnabled(True)
+        self.filter.textChanged.connect(lambda: self._fill(force=True))
+        hr.addWidget(self.filter)
+        b = QPushButton("Open log (Excel / CSV)")
+        b.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(wifi_store.LOG_CSV)))
+                          if wifi_store.LOG_CSV.exists() else None)
+        hr.addWidget(b)
+        self.block_btn = QPushButton("Block device…")
+        self.block_btn.setMinimumWidth(130)
+        self.block_btn.setEnabled(False)
+        self.block_btn.clicked.connect(self._block)
+        hr.addWidget(self.block_btn)
+        b = QPushButton("Clear log…")
+        b.clicked.connect(self._clear)
+        hr.addWidget(b)
+        lay.addLayout(hr)
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(26)
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.table.setWordWrap(False)
+        for i, w in enumerate(self.WIDTHS):
+            self.table.setColumnWidth(i, w)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.itemSelectionChanged.connect(self._sel_changed)
+        lay.addWidget(self.table, 1)
+        br = QHBoxLayout()
+        self.blocked_lbl = QLabel()
+        self.blocked_lbl.setWordWrap(True)
+        br.addWidget(self.blocked_lbl, 1)
+        b = QPushButton("Unblock all")
+        b.clicked.connect(self._unblock_all)
+        br.addWidget(b)
+        lay.addLayout(br)
+        copy_key = "Cmd+C" if sys.platform == "darwin" else "Ctrl+C"
+        lay.addWidget(_note(
+            "Device name and MAC address are looked up on your network and may be blank (many phones don't share a "
+            "name, and use a private MAC per Wi-Fi). Location: everyone here is on your own Wi-Fi, and local "
+            f"addresses like 192.168.x.x can't be placed on a map. Select rows and press {copy_key} to copy them. "
+            "Block device: select one of its rows. Its page closes within a few seconds and it can't come back "
+            "(by IP address; a device that gets a new address could)."))
+        cb = QHBoxLayout()
+        cb.addStretch(1)
+        b = QPushButton("Close")
+        b.clicked.connect(self.close)
+        cb.addWidget(b)
+        lay.addLayout(cb)
+        copy = QAction(self)
+        copy.setShortcut(QKeySequence.StandardKey.Copy)
+        copy.triggered.connect(self._copy)
+        self.table.addAction(copy)
+        self._sig = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self._tick()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.timer.start(2000)
+        self._tick()
+
+    def _delete(self):
+        if self.win.wifi_delete_all(self):
+            self._tick()
+
+    def _clear(self):
+        if QMessageBox.question(self, "Clear the activity log?",
+                                "Delete every line of the Wi-Fi activity log?") == QMessageBox.StandardButton.Yes:
+            wifi_store.clear_log()
+            self._fill(force=True)
+
+    # ---------------------------------------------------------------- block / unblock
+    def _sel_row(self):
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not rows:
+            return None, None
+        vals = [(self.table.item(rows[0], c).text() if self.table.item(rows[0], c) else "")
+                for c in range(len(self.COLS))]
+        return (vals[2], vals) if vals[2] else (None, None)
+
+    def _sel_changed(self):
+        ip, _r = self._sel_row()
+        if not ip:
+            self.block_btn.setText("Block device…")
+            self.block_btn.setEnabled(False)
+        else:
+            self.block_btn.setText("Unblock device" if wifi_store.is_blocked(ip) else "Block device…")
+            self.block_btn.setEnabled(True)
+
+    def _block(self):
+        ip, r = self._sel_row()
+        if not ip:
+            return
+        if wifi_store.is_blocked(ip):
+            wifi_store.unblock(ip)
+        else:
+            who = " · ".join(x for x in (r[3], r[5]) if x) or "this device"
+            if QMessageBox.question(self, "Block this device?", (
+                    f"Block {ip} ({who})?\n\nIts {APP_NAME} page closes within a few seconds and shows "
+                    "“Access ended”. It can't use sharing again until you unblock it. Its uploads stay in the "
+                    "folder.")) != QMessageBox.StandardButton.Yes:
+                return
+            wifi_store.block(ip, r[5], r[3])
+            self.win.wifi_command("kick", ip=ip)
+        self._sel_changed()
+        self._show_blocked()
+        QTimer.singleShot(1800, lambda: self._fill(force=True))
+
+    def _unblock_all(self):
+        for ip in list(wifi_store.blocked()):
+            wifi_store.unblock(ip)
+        self._sel_changed()
+        self._show_blocked()
+        QTimer.singleShot(1800, lambda: self._fill(force=True))
+
+    def _show_blocked(self):
+        b = wifi_store.blocked()
+        txt = "Blocked devices: " + ("none" if not b else "   ".join(
+            f"⛔ {ip}" + (f" ({v.get('device')})" if v.get("device") else "") + f" since {v.get('since', '')}"
+            for ip, v in b.items()))
+        if self.blocked_lbl.text() != txt:
+            self.blocked_lbl.setText(txt)
+
+    def _copy(self):
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if rows:
+            QApplication.clipboard().setText("\n".join(
+                "\t".join(self.table.item(r, c).text() if self.table.item(r, c) else "" for c in range(len(self.COLS)))
+                for r in rows))
+
+    def _fill(self, force=False):
+        rows = wifi_store.read_log()
+        q = self.filter.text().strip().lower()
+        if q:
+            rows = [r for r in rows if q in " ".join(r).lower()]
+        sig = (len(rows), tuple(rows[0]) if rows else None, q)
+        if sig == self._sig and not force:
+            return
+        self._sig = sig
+        self.table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            for c, v in enumerate((r + [""] * len(self.COLS))[:len(self.COLS)]):
+                it = QTableWidgetItem(v)
+                if c == len(self.COLS) - 1:
+                    it.setToolTip(v)
+                self.table.setItem(i, c, it)
+        self._sel_changed()
+
+    def _tick(self):
+        n, size = wifi_store.stats()
+        if n:
+            self.warn.setText(f"⚠  {n} upload{'s' * (n != 1)} from Wi-Fi users stored on this computer "
+                              f"({human_size(size)}). Delete them when you no longer need them.")
+            self.warn.setStyleSheet(f"color: {WARN_COLOR};")
+        else:
+            self.warn.setText("No uploads stored.")
+            self.warn.setStyleSheet("")
+        self._fill()
+        self._show_blocked()
+
+    def closeEvent(self, e):
+        self.timer.stop()
+        super().closeEvent(e)
 
 
 # ======================================================================== main window
@@ -1487,6 +1768,7 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         self.doc, self.path, self.password, self.busy = None, None, None, False
         self.wifi_proc, self.wifi_dlg, self.wifi_state = None, None, None
+        self.wifi_admin_dlg, self._wifi_hidden = None, None
         self.wifi_timer = QTimer(self)
         self.wifi_timer.timeout.connect(self._wifi_poll)
         self.setAcceptDrops(True)
@@ -1503,7 +1785,13 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.addWidget(self.view)
         self.stack.addWidget(self.organize)
-        self.setCentralWidget(self.stack)
+        central = QWidget()
+        cl = QVBoxLayout(central)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(0)
+        cl.addWidget(self._build_wifi_note())
+        cl.addWidget(self.stack, 1)
+        self.setCentralWidget(central)
         self.empty = QLabel("Open a PDF  (Ctrl+O)  or drop one here", self.view)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty.setStyleSheet("font-size: 15px;")
@@ -1685,7 +1973,8 @@ class MainWindow(QMainWindow):
         self.empty.setVisible(not on)
 
     def _title(self):
-        self.setWindowTitle(f"{self.path.name} — {APP_NAME}" if self.path else APP_NAME)
+        name = f"{APP_NAME} (v{APP_VERSION})"
+        self.setWindowTitle(f"{self.path.name} — {name}" if self.path else name)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -1996,6 +2285,89 @@ class MainWindow(QMainWindow):
             show_in_folder(self.path)
 
     # ---------------------------------------------------------------- Share via Wi-Fi
+    def _build_wifi_note(self):
+        """Reminder bar: PDFs people opened over Wi-Fi are still stored on this computer."""
+        bar = self.wifi_note = QWidget()
+        bar.setObjectName("wifiNote")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(12, 6, 12, 6)
+        self.wifi_note_lbl = QLabel()
+        self.wifi_note_lbl.setStyleSheet(f"color: {WARN_COLOR}; font-weight: 600;")
+        h.addWidget(self.wifi_note_lbl, 1)
+        for text, fn in (("Open folder", self.wifi_open_folder), ("Delete all…", lambda: self.wifi_delete_all()),
+                         ("Admin…", self.wifi_admin), ("Hide", self._hide_wifi_note)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            h.addWidget(b)
+        bar.hide()
+        self.wifi_note_timer = QTimer(self)
+        self.wifi_note_timer.timeout.connect(self.refresh_wifi_note)
+        self.wifi_note_timer.start(10000)
+        QTimer.singleShot(1500, self.refresh_wifi_note)
+        return bar
+
+    def refresh_wifi_note(self):
+        """Show the reminder while Wi-Fi uploads are stored (after Hide: only once more arrive)."""
+        try:
+            n, size = wifi_store.stats()
+        except Exception:
+            n, size = 0, 0
+        if self.wifi_dlg is not None:
+            self.wifi_dlg.stored(n, size)
+        if n and (self._wifi_hidden is None or n > self._wifi_hidden):
+            self._wifi_hidden = None
+            self.wifi_note_lbl.setText(f"⚠  {n} Wi-Fi upload{'s' * (n != 1)} ({human_size(size)}) stored on this "
+                                       "computer. Delete them when you no longer need them.")
+            self.wifi_note.show()
+        else:
+            self.wifi_note.hide()
+
+    def _hide_wifi_note(self):
+        self._wifi_hidden = wifi_store.stats()[0]
+        self.wifi_note.hide()
+
+    def wifi_open_folder(self):
+        wifi_store.WORK.mkdir(parents=True, exist_ok=True)
+        show_in_folder(wifi_store.WORK)
+
+    def wifi_delete_all(self, parent=None):
+        """Ask, then delete every stored upload and its results. Returns True when deleted."""
+        parent = parent or self
+        n, size = wifi_store.stats()
+        if not n:
+            QMessageBox.information(parent, "Wi-Fi uploads", "There are no stored uploads.")
+            return False
+        if QMessageBox.question(parent, "Delete all Wi-Fi uploads?", (
+                f"Delete {n} upload{'s' * (n != 1)} ({human_size(size)}) that people opened over Wi-Fi, with "
+                "their results?\n\nThey're deleted for good (not to the Recycle Bin / Trash). Anyone still viewing "
+                "them can no longer use them. The activity log is kept.")) != QMessageBox.StandardButton.Yes:
+            return False
+        self.wifi_command("purge")      # the sharing server lets go of the open PDFs first
+        wifi_store.delete_all()
+        self.refresh_wifi_note()
+        return True
+
+    def wifi_admin(self):
+        if self.wifi_admin_dlg is None:
+            self.wifi_admin_dlg = WifiAdminDialog(self)
+        self.wifi_admin_dlg.show()
+        self.wifi_admin_dlg.raise_()
+        self.wifi_admin_dlg.activateWindow()
+
+    def wifi_command(self, do, **params):
+        """Tell the running sharing server something (quit, purge, kick). True if it answered."""
+        st = self.wifi_state
+        if self.wifi_proc is None or self.wifi_proc.poll() is not None or not st:
+            return False
+        q = urllib.parse.urlencode({"do": do, **params})
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{st['port']}/api/admin?{q}",
+                                         headers={"X-Quit": st["quit"]})
+            urllib.request.urlopen(req, timeout=3).read()
+            return True
+        except Exception:
+            return False
+
     def wifi_clicked(self):
         self.a_wifi.setChecked(self.wifi_proc is not None)   # the button shows the state; the dialog changes it
         if self.wifi_proc is None:
@@ -2008,6 +2380,7 @@ class MainWindow(QMainWindow):
             self.wifi_dlg = WifiDialog(self)
             self.wifi_dlg.turnOff.connect(self.wifi_stop)
             self.wifi_dlg.turnOn.connect(self.wifi_start)
+            self.refresh_wifi_note()
         return self.wifi_dlg
 
     def wifi_start(self):
@@ -2032,14 +2405,20 @@ class MainWindow(QMainWindow):
         if st and st.get("error"):
             failed = st["error"]
         elif st and st.get("urls"):
-            if st["urls"] != self.wifi_urls:   # the IP link comes first; the .local link follows
-                self.wifi_urls, self.wifi_state = st["urls"], st
-                self.wifi_dialog().ready(st["urls"])
+            self.wifi_state = st
+            if st["urls"] != self.wifi_urls or self.wifi_waited % 6 == 0:  # the .local link follows the IP one
+                self.wifi_urls = st["urls"]
+                self.wifi_dialog().ready(st)
                 self.wifi_label.setText(f"📶 Sharing on Wi-Fi: {st['urls'][0]}")
                 self.wifi_label.show()
+            else:
+                self.wifi_dialog().counts(st)
             if st.get("mdns") != "pending" or self.wifi_waited > 160:
-                self.wifi_timer.stop()
-            return
+                self.wifi_timer.setInterval(1500)       # from now on just the upload count
+            if self.wifi_proc.poll() is not None:
+                failed = "The sharing server stopped unexpectedly."
+            else:
+                return
         elif self.wifi_proc.poll() is not None:
             failed = "The sharing server stopped unexpectedly."
         elif self.wifi_waited > 80:   # 20 seconds
@@ -2050,17 +2429,13 @@ class MainWindow(QMainWindow):
             self.wifi_dialog().off(failed)
 
     def wifi_stop(self):
+        """Turn off. Open pages say "Wi-Fi sharing has ended" for a few seconds, then the server quits."""
         self.wifi_timer.stop()
-        st = getattr(self, "wifi_state", None)
-        if self.wifi_proc is not None and self.wifi_proc.poll() is None and st:
-            try:   # ask nicely so it can sign off the .local name; fall back to ending it
-                req = urllib.request.Request(f"http://127.0.0.1:{st['port']}/api/quit",
-                                             headers={"X-Quit": st["quit"]})
-                urllib.request.urlopen(req, timeout=2).read()
-                self.wifi_proc.wait(timeout=4)
-            except Exception:
-                pass
-        self._wifi_kill()
+        if not self.wifi_command("quit"):
+            self._wifi_kill()
+        self.wifi_proc, self.wifi_state = None, None      # it ends by itself after telling the pages
+        self.a_wifi.setChecked(False)
+        self.wifi_label.hide()
         if self.wifi_dlg is not None:
             self.wifi_dlg.off()
 

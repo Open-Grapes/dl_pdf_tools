@@ -221,9 +221,10 @@ def smoke_test():
             print("Share via Wi-Fi:", st["urls"], flush=True)
             with urllib.request.urlopen(f"http://127.0.0.1:{st['port']}/api/heartbeat", timeout=5) as r:
                 assert r.status == 200
-            req = urllib.request.Request(f"http://127.0.0.1:{st['port']}/api/quit", headers={"X-Quit": st["quit"]})
+            req = urllib.request.Request(f"http://127.0.0.1:{st['port']}/api/admin?do=quit",
+                                         headers={"X-Quit": st["quit"]})
             urllib.request.urlopen(req, timeout=5).read()
-            p.wait(timeout=15)
+            p.wait(timeout=30)   # it tells open pages "sharing has ended" for a few seconds first
     finally:
         if p.poll() is None:
             p.terminate()

@@ -40,6 +40,8 @@ scales the result up, which is usually within a few percent.
 
 ## Updates
 
+The window title shows which version you have (e.g. `dl_pdf_tools (v1.6)`).
+
 Click **Check for updates** (top right). The window shows your version, the latest version on GitHub with its
 release date, and that release's *What's new* notes:
 
@@ -75,7 +77,16 @@ code or type an address into Safari or Chrome. You get the same viewer and tools
 - Results download to the phone. On iPhone, tap **Download** and find the file in the Files app → Downloads.
 
 The PC does the work, so it must be on with dl_pdf_tools open. Sharing stays on until you click **Turn off** or close
-the app. There's no password, so anyone on the same Wi-Fi who knows the address can open the page while sharing is on.
+the app; open pages then show "Wi-Fi sharing has ended".
+
+- There's no password: anyone on your Wi-Fi who knows the address can use it while sharing is on.
+- Each device only sees and downloads its own files. The window counts how many PDFs were opened from how many
+  devices.
+- PDFs people open are kept on this computer, one folder each (with their results), until you delete them. A
+  reminder bar shows while any are stored, with **Open folder**, **Delete all…**, **Admin…** and **Hide**.
+- **Admin…** shows the stored uploads (**Open folder**, **Delete all uploads…**) and an activity log (date, time,
+  IP address, device name, MAC address, device, action) that opens in Excel. Select a row and **Block device…** to
+  end that device's access ("Access ended" on its page); **Unblock all** lets them back in.
 
 **Phone can't connect?** The first time, Windows asks whether to allow dl_pdf_tools on networks: allow it on
 *Private networks*. Your Wi-Fi must also be set to *Private* in Windows Settings → Network & internet.
@@ -91,9 +102,9 @@ py -3.13 -m venv .venv
 
 ## Publishing a new version
 
-1. Raise `APP_VERSION` in `dlpt/common.py` (e.g. `1.5.0` → `1.6.0`).
+1. Raise `APP_VERSION` in `dlpt/common.py` (two numbers, e.g. `1.6` → `1.7`).
 2. Build Windows with `build.py`; push to `main` so GitHub Actions builds the two Mac `.dmg` files.
-3. Create a GitHub release tagged `v1.6.0` with `dl_pdf_tools-windows.zip`,
+3. Create a GitHub release tagged `v1.7` with `dl_pdf_tools-windows.zip`,
    `dl_pdf_tools-mac-apple-silicon.dmg` and `dl_pdf_tools-mac-intel.dmg` attached (keep these exact names: the
    updater looks for them). The release notes are what users see under "What's new".
 
